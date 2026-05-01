@@ -17,7 +17,7 @@ from auth import require_admin_key
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins="*")
 
 REALNEX_SEARCH_API = 'https://searchv2.realnex.com/api/v2/SearchListing1'
 
