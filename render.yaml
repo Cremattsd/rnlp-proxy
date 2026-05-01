@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: rnlp-proxy
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+      - key: ADMIN_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        value: serials.db
