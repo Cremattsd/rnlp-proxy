@@ -19,7 +19,8 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app, origins="*")
 
-REALNEX_SEARCH_API = 'https://searchv2.realnex.com/api/v2/SearchListing1'
+REALNEX_SEARCH_API    = 'https://searchv2.realnex.com/api/v2/SearchListing1'
+REALNEX_PROPERTY_API  = 'https://searchv2.realnex.com/api/v2/PropertyDetails'
 
 
 # ── DB init ────────────────────────────────────────────────────────────────
@@ -128,6 +129,44 @@ def listings():
             REALNEX_SEARCH_API,
             data=body,
             headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return jsonify(resp.json()), resp.status_code
+    except requests.Timeout:
+        return jsonify({'error': 'RealNex API timeout'}), 504
+    except requests.RequestException as exc:
+        return jsonify({'error': str(exc)}), 502
+
+
+@app.route('/property', methods=['POST'])
+def property_detail():
+    """
+    POST /property
+    Body: { "serial": "...", "property_id": "..." }
+    Validates serial, injects company_id, proxies to RealNex PropertyDetails.
+    """
+    data        = request.get_json(silent=True) or {}
+    serial      = data.get('serial', '').strip()
+    property_id = data.get('property_id', '').strip()
+
+    if not serial:
+        return jsonify({'error': 'serial required'}), 400
+    if not property_id:
+        return jsonify({'error': 'property_id required'}), 400
+
+    row = get_serial(serial)
+    if not row or not row['active']:
+        return jsonify({'error': 'Invalid or expired serial'}), 403
+
+    if _is_expired(row['expires_at']):
+        return jsonify({'error': 'Serial expired'}), 403
+
+    try:
+        resp = requests.post(
+            REALNEX_PROPERTY_API,
+            json={'Id': property_id, 'CompanyIDs': [row['company_id']]},
+            headers={'Content-Type': 'application/json'},
             timeout=30,
         )
         resp.raise_for_status()
