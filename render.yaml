@@ -9,3 +9,5 @@ services:
         generateValue: true
       - key: DATABASE_URL
         sync: false
+      - key: WALKSCORE_API_KEY
+        sync: false

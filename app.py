@@ -142,41 +142,101 @@ def listings():
 
 def _fetch_demographics(zip_code: str) -> dict | None:
     """
-    Fetch ACS 5-year census demographics for a ZIP code.
-    Returns {population, median_income, median_home_value} or None on any failure.
+    Fetch ACS 5-year census demographics for a ZIP code via direct ZCTA query.
+    Returns {population, median_income, median_home_value, unemployment} or None.
     """
     if not zip_code:
         return None
     try:
-        resp = requests.get(
-            CENSUS_API,
-            params={
-                'get':  'B01003_001E,B19013_001E,B25077_001E',
-                'for':  f'zip code tabulation area:{zip_code.strip()}',
-                'in':   'state:*',
-            },
-            timeout=10,
-        )
+        zc = zip_code.strip()
+        url = (f'{CENSUS_API}?get=B01003_001E,B19013_001E,B25077_001E,B23025_005E'
+               f'&for=zip%20code%20tabulation%20area:{zc}')
+        resp = requests.get(url, timeout=10)
         resp.raise_for_status()
-        rows = resp.json()          # [[header...], [values...]]
-        if len(rows) < 2:
+        data = resp.json()
+        if len(data) < 2:
             return None
-        headers = rows[0]
-        values  = rows[1]
-        row = dict(zip(headers, values))
-        def _int(key):
+        hdrs = data[0]
+        vals = data[1]
+
+        def _safe(key):
             try:
-                v = int(row.get(key, -1))
-                return v if v >= 0 else None
-            except (TypeError, ValueError):
+                v = vals[hdrs.index(key)]
+                return int(v) if v and v != '-666666666' else None
+            except (ValueError, IndexError):
                 return None
+
+        print(f'[census] zip={zc} raw={vals}')
         return {
-            'population':        _int('B01003_001E'),
-            'median_income':     _int('B19013_001E'),
-            'median_home_value': _int('B25077_001E'),
+            'population':        _safe('B01003_001E'),
+            'median_income':     _safe('B19013_001E'),
+            'median_home_value': _safe('B25077_001E'),
+            'unemployment':      _safe('B23025_005E'),
         }
-    except Exception:
+    except Exception as e:
+        print(f'Census error for zip {zip_code}: {e}')
         return None
+
+
+def _fetch_walk_score(lat: float, lon: float, address: str) -> dict | None:
+    """Fetch Walk Score (walk/transit/bike) if WALKSCORE_API_KEY is set."""
+    key = os.getenv('WALKSCORE_API_KEY', '')
+    if not key or not lat or not lon:
+        return None
+    try:
+        resp = requests.get(
+            'https://api.walkscore.com/score',
+            params={
+                'format':   'json',
+                'address':  address,
+                'lat':      lat,
+                'lon':      lon,
+                'transit':  1,
+                'bike':     1,
+                'wsapikey': key,
+            },
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            d = resp.json()
+            return {
+                'walk':         d.get('walkscore'),
+                'walk_desc':    d.get('description'),
+                'transit':      d['transit']['score']       if d.get('transit') else None,
+                'transit_desc': d['transit']['description'] if d.get('transit') else None,
+                'bike':         d['bike']['score']          if d.get('bike') else None,
+                'bike_desc':    d['bike']['description']    if d.get('bike') else None,
+            }
+    except Exception as e:
+        print(f'Walk Score error: {e}')
+    return None
+
+
+def _fetch_neighborhood(lat: float, lon: float) -> dict | None:
+    """Reverse-geocode lat/lon via Nominatim to get neighborhood context."""
+    if not lat or not lon:
+        return None
+    try:
+        resp = requests.get(
+            'https://nominatim.openstreetmap.org/reverse',
+            params={'lat': lat, 'lon': lon, 'format': 'json', 'addressdetails': '1'},
+            headers={'User-Agent': 'RealNexListingsPro/1.0'},
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            d    = resp.json()
+            addr = d.get('address', {})
+            return {
+                'neighborhood': (addr.get('neighbourhood') or addr.get('suburb')
+                                 or addr.get('quarter')),
+                'county':  addr.get('county'),
+                'city':    addr.get('city') or addr.get('town'),
+                'state':   addr.get('state'),
+                'display': d.get('display_name', '')[:120],
+            }
+    except Exception as e:
+        print(f'Nominatim error: {e}')
+    return None
 
 
 @app.route('/property', methods=['POST'])
@@ -276,11 +336,25 @@ def property_detail():
 
     prop = listings[0]
 
-    # ── Census demographics ───────────────────────────────────────────────
-    zip_code     = prop.get('Zip', '')
-    demographics = _fetch_demographics(zip_code)
+    # ── Enrich with census, walk score, neighborhood ─────────────────────
+    zip_code = prop.get('Zip', '')
+    lat      = float(prop.get('AddrLatitude',  0) or 0)
+    lon      = float(prop.get('AddrLongitude', 0) or 0)
+    address  = ', '.join(filter(None, [
+        prop.get('Street', ''), prop.get('City', ''),
+        prop.get('State', ''), zip_code,
+    ]))
 
-    return jsonify({'property': prop, 'demographics': demographics})
+    demographics = _fetch_demographics(zip_code)
+    walk_score   = _fetch_walk_score(lat, lon, address)
+    neighborhood = _fetch_neighborhood(lat, lon)
+
+    return jsonify({
+        'property':     prop,
+        'demographics': demographics,
+        'walk_score':   walk_score,
+        'neighborhood': neighborhood,
+    })
 
 
 @app.route('/register', methods=['POST'])
