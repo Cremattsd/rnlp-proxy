@@ -206,7 +206,12 @@ def property_detail():
         return jsonify({'error': 'Serial expired'}), 403
 
     # ── Fetch listing via SearchListing1 with Id filter ───────────────────
-    filters = {
+    try:
+        prop_id_int = int(property_id)
+    except (ValueError, TypeError):
+        prop_id_int = property_id
+
+    payload = {
         'startIndex':    0,
         'NoOfRecords':   1,
         'SortBy':        'updated',
@@ -214,15 +219,13 @@ def property_detail():
         'PropertyTypes': '',
         'AgentIDs':      False,
         'CompanyIDs':    [row['company_id']],
-        'Id':            property_id,
+        'Id':            prop_id_int,
     }
 
     try:
-        body = _encode_filters(filters)
         resp = requests.post(
             REALNEX_SEARCH_API,
-            data=body,
-            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            json=payload,
             timeout=30,
         )
         resp.raise_for_status()
@@ -232,7 +235,7 @@ def property_detail():
     except requests.RequestException as exc:
         return jsonify({'error': str(exc)}), 502
 
-    # SearchListing1 returns [[...listings...], total_count]
+    # SearchListing1 returns [listings_array, total, ...] — extract listings_array[0]
     listings = result[0] if isinstance(result, list) and result else []
     if not listings:
         return jsonify({'error': 'Property not found'}), 404
