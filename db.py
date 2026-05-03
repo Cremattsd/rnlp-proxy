@@ -37,20 +37,21 @@ def get_serial(serial: str):
             return dict(row) if row else None
 
 
-def register_serial(serial: str, company_id: str, email: str, plan: str, expires_at):
+def register_serial(serial: str, company_id: str, email: str, plan: str, expires_at, jwt: str = ''):
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute('''
-                INSERT INTO serials (serial, company_id, email, plan, expires_at, active, created_at)
-                VALUES (%s, %s, %s, %s, %s, 1, %s)
+                INSERT INTO serials (serial, company_id, email, plan, expires_at, active, jwt, created_at)
+                VALUES (%s, %s, %s, %s, %s, 1, %s, %s)
                 ON CONFLICT (serial) DO UPDATE SET
                     company_id = EXCLUDED.company_id,
                     email      = EXCLUDED.email,
                     plan       = EXCLUDED.plan,
                     expires_at = EXCLUDED.expires_at,
-                    active     = 1
-            ''', (serial, company_id, email or '', plan or 'basic', expires_at, now))
+                    active     = 1,
+                    jwt        = EXCLUDED.jwt
+            ''', (serial, company_id, email or '', plan or 'basic', expires_at, jwt or '', now))
         conn.commit()
 
 
