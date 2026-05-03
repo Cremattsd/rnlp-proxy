@@ -19,8 +19,8 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app, origins="*")
 
-REALNEX_SEARCH_API    = 'https://searchv2.realnex.com/api/v2/SearchListing1'
-REALNEX_PROPERTY_API  = 'https://searchv2.realnex.com/api/v2/PropertyDetails'
+REALNEX_SEARCH_API = 'https://searchv2.realnex.com/api/v2/SearchListing1'
+CENSUS_API         = 'https://api.census.gov/data/2022/acs/acs5'
 
 
 # ── DB init ────────────────────────────────────────────────────────────────
@@ -139,12 +139,55 @@ def listings():
         return jsonify({'error': str(exc)}), 502
 
 
+def _fetch_demographics(zip_code: str) -> dict | None:
+    """
+    Fetch ACS 5-year census demographics for a ZIP code.
+    Returns {population, median_income, median_home_value} or None on any failure.
+    """
+    if not zip_code:
+        return None
+    try:
+        resp = requests.get(
+            CENSUS_API,
+            params={
+                'get':  'B01003_001E,B19013_001E,B25077_001E',
+                'for':  f'zip code tabulation area:{zip_code.strip()}',
+                'in':   'state:*',
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        rows = resp.json()          # [[header...], [values...]]
+        if len(rows) < 2:
+            return None
+        headers = rows[0]
+        values  = rows[1]
+        row = dict(zip(headers, values))
+        def _int(key):
+            try:
+                v = int(row.get(key, -1))
+                return v if v >= 0 else None
+            except (TypeError, ValueError):
+                return None
+        return {
+            'population':        _int('B01003_001E'),
+            'median_income':     _int('B19013_001E'),
+            'median_home_value': _int('B25077_001E'),
+        }
+    except Exception:
+        return None
+
+
 @app.route('/property', methods=['POST'])
 def property_detail():
     """
     POST /property
     Body: { "serial": "...", "property_id": "..." }
-    Validates serial, injects company_id, proxies to RealNex PropertyDetails.
+
+    Uses SearchListing1 with Id filter (NoOfRecords=1) to retrieve the full
+    listing object, then appends census demographics keyed on Zip.
+
+    Returns: { "property": {...}, "demographics": {...} | null }
     """
     data        = request.get_json(silent=True) or {}
     serial      = data.get('serial', '').strip()
@@ -162,19 +205,45 @@ def property_detail():
     if _is_expired(row['expires_at']):
         return jsonify({'error': 'Serial expired'}), 403
 
+    # ── Fetch listing via SearchListing1 with Id filter ───────────────────
+    filters = {
+        'startIndex':    0,
+        'NoOfRecords':   1,
+        'SortBy':        'updated',
+        'SearchType':    '',
+        'PropertyTypes': '',
+        'AgentIDs':      False,
+        'CompanyIDs':    [row['company_id']],
+        'Id':            property_id,
+    }
+
     try:
+        body = _encode_filters(filters)
         resp = requests.post(
-            REALNEX_PROPERTY_API,
-            json={'Id': property_id, 'CompanyIDs': [row['company_id']]},
-            headers={'Content-Type': 'application/json'},
+            REALNEX_SEARCH_API,
+            data=body,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
             timeout=30,
         )
         resp.raise_for_status()
-        return jsonify(resp.json()), resp.status_code
+        result = resp.json()
     except requests.Timeout:
         return jsonify({'error': 'RealNex API timeout'}), 504
     except requests.RequestException as exc:
         return jsonify({'error': str(exc)}), 502
+
+    # SearchListing1 returns [[...listings...], total_count]
+    listings = result[0] if isinstance(result, list) and result else []
+    if not listings:
+        return jsonify({'error': 'Property not found'}), 404
+
+    prop = listings[0]
+
+    # ── Census demographics ───────────────────────────────────────────────
+    zip_code     = prop.get('Zip', '')
+    demographics = _fetch_demographics(zip_code)
+
+    return jsonify({'property': prop, 'demographics': demographics})
 
 
 @app.route('/register', methods=['POST'])
