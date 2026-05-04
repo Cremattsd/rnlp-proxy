@@ -26,6 +26,17 @@ def init_db():
                     created_at  TEXT
                 )
             ''')
+            cur.execute("ALTER TABLE serials ADD COLUMN IF NOT EXISTS domain TEXT DEFAULT ''")
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS reports (
+                    id         SERIAL PRIMARY KEY,
+                    serial     TEXT,
+                    domain     TEXT,
+                    event      TEXT,
+                    payload    TEXT,
+                    created_at TEXT
+                )
+            ''')
         conn.commit()
 
 
@@ -67,3 +78,28 @@ def get_all_serials():
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute('SELECT * FROM serials ORDER BY created_at DESC')
             return [dict(r) for r in cur.fetchall()]
+
+
+def log_report(serial: str, domain: str, event: str, payload: str = ''):
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                'INSERT INTO reports (serial, domain, event, payload, created_at) VALUES (%s, %s, %s, %s, %s)',
+                (serial, domain, event, payload, now),
+            )
+        conn.commit()
+
+
+def get_all_reports():
+    with get_db() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute('SELECT * FROM reports ORDER BY created_at DESC LIMIT 500')
+            return [dict(r) for r in cur.fetchall()]
+
+
+def update_serial_domain(serial: str, domain: str):
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute('UPDATE serials SET domain = %s WHERE serial = %s', (domain, serial))
+        conn.commit()

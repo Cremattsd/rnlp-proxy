@@ -11,7 +11,7 @@ from urllib.parse import urlencode, quote
 import requests
 import os
 
-from db import init_db, get_serial, register_serial, revoke_serial, get_all_serials
+from db import init_db, get_serial, register_serial, revoke_serial, get_all_serials, log_report, get_all_reports, update_serial_domain
 from auth import require_admin_key
 
 load_dotenv()
@@ -376,8 +376,12 @@ def register():
     if not serial or not company_id:
         return jsonify({'error': 'serial and company_id are required'}), 400
 
+    domain = data.get('domain', '').strip()
+
     try:
         register_serial(serial, company_id, email, plan, expires_at, jwt)
+        if domain:
+            update_serial_domain(serial, domain)
         return jsonify({'success': True, 'serial': serial})
     except Exception as exc:
         return jsonify({'error': str(exc)}), 500
@@ -586,6 +590,35 @@ def lead():
         'projects':     projects_linked,
         'linked_count': linked_count,
     })
+
+
+@app.route('/report', methods=['POST'])
+def report():
+    """
+    POST /report  (no auth — fire-and-forget from plugin)
+    Body: { "serial", "domain", "event", "timestamp", ... }
+    Logs tamper/anomaly events to the reports table.
+    """
+    import json
+    data   = request.get_json(silent=True) or {}
+    serial = data.get('serial', '').strip()
+    domain = data.get('domain', '').strip()
+    event  = data.get('event', 'unknown').strip()
+    try:
+        log_report(serial, domain, event, json.dumps(data))
+    except Exception as exc:
+        print(f'[/report] log error: {exc}')
+    return jsonify({'ok': True}), 200
+
+
+@app.route('/reports', methods=['GET'])
+@require_admin_key
+def reports():
+    """
+    GET /reports  (X-Admin-Key required)
+    Returns recent tamper/anomaly reports.
+    """
+    return jsonify(get_all_reports())
 
 
 if __name__ == '__main__':
