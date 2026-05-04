@@ -122,7 +122,8 @@ def listings():
 
     # Inject company_id — never trust client-supplied CompanyIDs
     filters.pop('CompanyIDs', None)
-    filters['CompanyIDs'] = [row['company_id']]
+    raw = row['company_id']
+    filters['CompanyIDs'] = [c.strip() for c in raw.split(',')]
 
     try:
         body = _encode_filters(filters)
@@ -279,12 +280,12 @@ def property_detail():
         'SearchType':    '',
         'PropertyTypes': '',
         'AgentIDs':      'false',
-        'CompanyIDs':    row['company_id'],
+        'CompanyIDs':    [c.strip() for c in row['company_id'].split(',')],
         'Id':            str(prop_id_int),
     }
 
     try:
-        print(f'[/property] fetching id={prop_id_int} company={row["company_id"]}')
+        print(f'[/property] fetching id={prop_id_int}')
         resp = requests.post(
             REALNEX_SEARCH_API,
             data=payload,
@@ -314,7 +315,7 @@ def property_detail():
                 'SearchType':    '',
                 'PropertyTypes': '',
                 'AgentIDs':      'false',
-                'CompanyIDs':    row['company_id'],
+                'CompanyIDs':    [c.strip() for c in row['company_id'].split(',')],
             }
             fb_resp = requests.post(
                 REALNEX_SEARCH_API,
