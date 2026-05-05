@@ -592,6 +592,161 @@ def lead():
     })
 
 
+def _get_listings_ssr(company_id: str) -> list:
+    """Fetch up to 50 listings for SSR — used by /embed for bots."""
+    try:
+        payload = {
+            'startIndex': '0', 'NoOfRecords': '50', 'SortBy': 'updated',
+            'SearchType': '', 'PropertyTypes': '', 'AgentIDs': 'false',
+            'CompanyIDs': [c.strip() for c in company_id.split(',')],
+        }
+        resp = requests.post(
+            REALNEX_SEARCH_API, data=payload,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=30,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        return result[0] if isinstance(result, list) and result else []
+    except Exception as exc:
+        print(f'[SSR] listings fetch error: {exc}')
+        return []
+
+
+def _render_seo_html(listings: list, company_name: str) -> str:
+    """Generate a static HTML page of listings for search-engine crawlers."""
+    cards = ''
+    for p in listings[:50]:
+        name  = p.get('PropertyName', '')
+        addr  = ', '.join(filter(None, [p.get('Street'), p.get('City'), p.get('State'), p.get('Zip')]))
+        price = ''
+        if p.get('PriceDisclosed') and p.get('ListPrice'):
+            price = f'${int(p["ListPrice"]):,}'
+        img = ''
+        for att in (p.get('Attachments') or []):
+            if att.get('AttachmentType') == 'photo' and att.get('FileName'):
+                img = att['FileName'] + '?h=400&mode=max&autorotate=true'
+                break
+        cards += (
+            f'<article class="rnlp-ssr-card">'
+            f'{f"<img src=\"{img}\" alt=\"{name}\" loading=\"lazy\">" if img else ""}'
+            f'<div class="rnlp-ssr-body">'
+            f'<h3>{name}</h3><p>{addr}</p>'
+            f'{f"<p><strong>{price}</strong></p>" if price else ""}'
+            f'<p>{p.get("ListingType", "")}</p>'
+            f'</div></article>'
+        )
+    return (
+        f'<!DOCTYPE html><html lang="en"><head>'
+        f'<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+        f'<title>{company_name} — Commercial Real Estate Listings</title>'
+        f'<style>'
+        f'body{{font-family:sans-serif;margin:0;padding:20px;background:#f8fafc}}'
+        f'h1{{text-align:center;color:#013161;margin-bottom:24px}}'
+        f'.rnlp-ssr-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:20px;max-width:1200px;margin:0 auto}}'
+        f'.rnlp-ssr-card{{background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}}'
+        f'.rnlp-ssr-card img{{width:100%;height:180px;object-fit:cover;display:block}}'
+        f'.rnlp-ssr-body{{padding:16px}}'
+        f'.rnlp-ssr-body h3{{margin:0 0 4px;font-size:16px}}'
+        f'.rnlp-ssr-body p{{margin:2px 0;font-size:13px;color:#64748b}}'
+        f'</style></head><body>'
+        f'<h1>{company_name}</h1>'
+        f'<div class="rnlp-ssr-grid">{cards}</div>'
+        f'</body></html>'
+    )
+
+
+def _render_embed_html(serial: str, company_name: str, theme: str) -> str:
+    """Generate the browser-facing embed page that bootstraps widget.js."""
+    return (
+        f'<!DOCTYPE html><html lang="en"><head>'
+        f'<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+        f'<title>{company_name} — Listings</title>'
+        f'</head><body>'
+        f'<div id="rnlp-embed"></div>'
+        f'<script>window.RNLP_CONFIG = {{serial:"{serial}",theme:"{theme}",target:"#rnlp-embed"}};</script>'
+        f'<script src="/widget.js" async></script>'
+        f'</body></html>'
+    )
+
+
+@app.route('/embed', methods=['GET'])
+def embed():
+    """
+    GET /embed?serial=...&company=...&theme=...
+    Returns SSR HTML for search-engine crawlers, JS embed page for browsers.
+    """
+    serial = request.args.get('serial', '').strip()
+    if not serial:
+        return jsonify({'error': 'serial required'}), 400
+
+    row = get_serial(serial)
+    if not row or not row['active']:
+        return jsonify({'error': 'Invalid or revoked serial'}), 403
+
+    if _is_expired(row['expires_at']):
+        return jsonify({'error': 'Serial expired'}), 403
+
+    company_name = request.args.get('company', 'Commercial Listings')
+    theme        = request.args.get('theme', 'classic')
+    ua           = request.headers.get('User-Agent', '').lower()
+    is_bot       = any(b in ua for b in [
+        'googlebot', 'bingbot', 'slurp', 'duckduckbot', 'baiduspider',
+        'yandexbot', 'facebot', 'crawler', 'spider', 'bot',
+    ])
+
+    if is_bot:
+        listings = _get_listings_ssr(row['company_id'])
+        html     = _render_seo_html(listings, company_name)
+    else:
+        html = _render_embed_html(serial, company_name, theme)
+
+    return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+
+@app.route('/widget.js', methods=['GET'])
+def widget_js():
+    """
+    GET /widget.js
+    Standalone widget bootstrap script. Reads window.RNLP_CONFIG and renders
+    listings into the target element — works on any HTML page, no WordPress needed.
+    """
+    js = r"""(function(){
+var cfg=window.RNLP_CONFIG||{};
+if(!cfg.serial){console.warn('[RNLP] no serial configured');return;}
+var target=document.querySelector(cfg.target||'#rnlp-embed');
+if(!target){console.warn('[RNLP] target element not found');return;}
+var proxy='https://rnlp-proxy.onrender.com';
+target.innerHTML='<p style="font-family:sans-serif;color:#64748b;padding:20px">Loading listings\u2026</p>';
+fetch(proxy+'/listings',{
+  method:'POST',
+  headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({serial:cfg.serial,filters:{startIndex:0,NoOfRecords:50,SortBy:'updated',SortHow:'desc',SearchType:''}})
+})
+.then(function(r){return r.json();})
+.then(function(data){
+  var listings=Array.isArray(data)?data[0]:(data.listings||[]);
+  if(!listings||!listings.length){target.innerHTML='<p style="font-family:sans-serif;color:#94a3b8;padding:20px">No listings found.</p>';return;}
+  var html='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:20px;font-family:sans-serif">';
+  listings.forEach(function(p){
+    var img='';var atts=p.Attachments||[];
+    for(var i=0;i<atts.length;i++){if(atts[i].AttachmentType==='photo'&&atts[i].FileName){img=atts[i].FileName+'?h=400&mode=max&autorotate=true';break;}}
+    var addr=[p.Street,p.City,p.State,p.Zip].filter(Boolean).join(', ');
+    var price=(p.PriceDisclosed&&p.ListPrice)?'$'+parseInt(p.ListPrice).toLocaleString():'';
+    html+='<div style="background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.1)">';
+    if(img)html+='<img src="'+img+'" alt="" style="width:100%;height:160px;object-fit:cover;display:block">';
+    html+='<div style="padding:14px"><div style="font-weight:600;font-size:15px;margin-bottom:4px">'+(p.PropertyName||'')+'</div>';
+    html+='<div style="font-size:12px;color:#64748b">'+addr+'</div>';
+    if(price)html+='<div style="font-size:13px;font-weight:600;color:#013161;margin-top:6px">'+price+'</div>';
+    html+='<div style="font-size:11px;color:#94a3b8;margin-top:4px">'+(p.ListingType||'')+'</div></div></div>';
+  });
+  html+='</div>';
+  target.innerHTML=html;
+})
+.catch(function(e){console.error('[RNLP]',e);target.innerHTML='<p style="font-family:sans-serif;color:#ef4444;padding:20px">Failed to load listings.</p>';});
+})();"""
+    return js, 200, {'Content-Type': 'application/javascript; charset=utf-8'}
+
+
 @app.route('/report', methods=['POST'])
 def report():
     """
