@@ -703,6 +703,53 @@ def embed():
     return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
 
+@app.route('/site/<serial>', methods=['GET'])
+def serve_site(serial):
+    """
+    GET /site/<serial>?theme=...&company=...
+    Serves a full standalone listing page for the given serial.
+    """
+    row = get_serial(serial)
+    if not row or not row.get('active', True):
+        return (
+            '<!DOCTYPE html><html><body style="font-family:sans-serif;'
+            'background:#0d1828;color:#fff;display:flex;align-items:center;'
+            'justify-content:center;height:100vh;text-align:center;margin:0">'
+            '<div><div style="font-size:48px;margin-bottom:16px">&#128274;</div>'
+            '<h2 style="margin-bottom:10px">Invalid Serial</h2>'
+            '<p style="color:#7a90b0">Contact '
+            '<a href="mailto:msmith@initial3development.com" style="color:#c9a84c">'
+            'msmith@initial3development.com</a></p></div></body></html>'
+        ), 403, {'Content-Type': 'text/html; charset=utf-8'}
+
+    if _is_expired(row['expires_at']):
+        return (
+            '<!DOCTYPE html><html><body style="font-family:sans-serif;'
+            'background:#0d1828;color:#fff;display:flex;align-items:center;'
+            'justify-content:center;height:100vh;text-align:center;margin:0">'
+            '<div><div style="font-size:48px;margin-bottom:16px">&#9203;</div>'
+            '<h2 style="margin-bottom:10px">Serial Expired</h2>'
+            '<p style="color:#7a90b0">Contact '
+            '<a href="mailto:msmith@initial3development.com" style="color:#c9a84c">'
+            'msmith@initial3development.com</a> to renew.</p></div></body></html>'
+        ), 403, {'Content-Type': 'text/html; charset=utf-8'}
+
+    theme   = request.args.get('theme', 'darkgold')
+    company = request.args.get('company', 'Commercial Real Estate')
+
+    template_path = os.path.join(os.path.dirname(__file__), 'templates', 'embed.html')
+    try:
+        with open(template_path, 'r', encoding='utf-8') as f:
+            html = f.read()
+    except FileNotFoundError:
+        return jsonify({'error': 'embed template not found'}), 500
+
+    html = html.replace('{{SERIAL}}', serial)
+    html = html.replace('{{THEME}}', theme)
+    html = html.replace('{{COMPANY}}', company)
+    return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+
 @app.route('/widget.js', methods=['GET'])
 def widget_js():
     """

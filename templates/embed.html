@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{COMPANY}} — Commercial Real Estate Listings</title>
+<meta name="description" content="{{COMPANY}} commercial real estate listings — properties for sale and lease.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+/* ── THEME VARIABLES ── */
+body.t-classic{
+  --bg:#f5f6f8;--surface:#ffffff;--surface2:#f0f2f6;--nav-bg:#013161;
+  --border:#e2e8f0;--text:#1e293b;--muted:#64748b;--muted2:#94a3b8;
+  --accent:#013161;--accent2:#024694;--accent-text:#fff;
+  --card-bg:#fff;--card-border:#e2e8f0;--chip-bg:#e8f0fb;--chip-text:#013161;
+  --badge-sale:#013161;--badge-lease:#16a34a;--badge-sold:#ef4444;
+  --input-bg:#fff;--input-border:#cbd5e1;--modal-bg:#fff;
+}
+body.t-darkpro{
+  --bg:#0d1117;--surface:#161b22;--surface2:#1c2331;--nav-bg:#0d1117;
+  --border:rgba(255,255,255,.08);--text:#e6edf3;--muted:#8b949e;--muted2:#6b7280;
+  --accent:#3b82f6;--accent2:#2563eb;--accent-text:#fff;
+  --card-bg:#161b22;--card-border:rgba(255,255,255,.08);--chip-bg:rgba(59,130,246,.1);--chip-text:#3b82f6;
+  --badge-sale:rgba(59,130,246,.85);--badge-lease:rgba(34,197,94,.8);--badge-sold:rgba(239,68,68,.85);
+  --input-bg:#0d1117;--input-border:rgba(255,255,255,.12);--modal-bg:#161b22;
+}
+body.t-steel{
+  --bg:#0f1722;--surface:#162236;--surface2:#1c2d47;--nav-bg:#0f1722;
+  --border:rgba(74,144,196,.12);--text:#e2e8f0;--muted:#7a9ab8;--muted2:#5a7a98;
+  --accent:#4a90c4;--accent2:#3a7ab4;--accent-text:#fff;
+  --card-bg:#162236;--card-border:rgba(74,144,196,.15);--chip-bg:rgba(74,144,196,.1);--chip-text:#4a90c4;
+  --badge-sale:rgba(74,144,196,.9);--badge-lease:rgba(34,197,94,.8);--badge-sold:rgba(239,68,68,.85);
+  --input-bg:#0f1722;--input-border:rgba(74,144,196,.2);--modal-bg:#162236;
+}
+body.t-ember{
+  --bg:#0f0a00;--surface:#1a1200;--surface2:#221800;--nav-bg:#0f0a00;
+  --border:rgba(232,125,13,.12);--text:#f5e6c8;--muted:#a07840;--muted2:#6b5030;
+  --accent:#e87d0d;--accent2:#d06808;--accent-text:#fff;
+  --card-bg:#1a1200;--card-border:rgba(232,125,13,.15);--chip-bg:rgba(232,125,13,.1);--chip-text:#e87d0d;
+  --badge-sale:rgba(232,125,13,.9);--badge-lease:rgba(34,197,94,.8);--badge-sold:rgba(239,68,68,.85);
+  --input-bg:#0f0a00;--input-border:rgba(232,125,13,.2);--modal-bg:#1a1200;
+}
+body.t-darkgold{
+  --bg:#07090e;--surface:#0f1319;--surface2:#161c25;--nav-bg:#07090e;
+  --border:rgba(201,168,76,.1);--text:#e8eaf0;--muted:#64748b;--muted2:#4a6080;
+  --accent:#c9a84c;--accent2:#b89240;--accent-text:#07090e;
+  --card-bg:#0f1319;--card-border:rgba(201,168,76,.1);--chip-bg:rgba(201,168,76,.08);--chip-text:#c9a84c;
+  --badge-sale:rgba(201,168,76,.85);--badge-lease:rgba(34,197,94,.8);--badge-sold:rgba(239,68,68,.85);
+  --input-bg:#07090e;--input-border:rgba(201,168,76,.15);--modal-bg:#0f1319;
+}
+
+body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh}
+
+/* ── NAV ── */
+nav{
+  background:var(--nav-bg);padding:0 40px;height:62px;
+  display:flex;align-items:center;justify-content:space-between;
+  position:sticky;top:0;z-index:100;
+  border-bottom:1px solid var(--border);
+}
+.nav-brand{font-size:.95rem;font-weight:700;color:#fff;letter-spacing:-.01em}
+.nav-tagline{font-size:.75rem;opacity:.6;color:#fff;margin-top:1px}
+.nav-right{font-size:.8rem;color:rgba(255,255,255,.5)}
+
+/* ── HERO ── */
+.hero{
+  background:var(--surface);border-bottom:1px solid var(--border);
+  padding:52px 40px 40px;
+}
+.hero-inner{max-width:1160px;margin:0 auto}
+.hero-top{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:28px}
+.hero-title{font-size:clamp(1.5rem,3vw,2.2rem);font-weight:700;letter-spacing:-.02em;line-height:1.15}
+.hero-title span{color:var(--accent)}
+.hero-subtitle{font-size:.88rem;color:var(--muted);margin-top:6px}
+.hero-stat{text-align:right}
+.hero-stat-val{font-size:1.5rem;font-weight:700;color:var(--accent)}
+.hero-stat-lbl{font-size:.72rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+
+/* ── FILTER BAR ── */
+.filter-section{background:var(--surface);border-bottom:1px solid var(--border);padding:0 40px 16px}
+.filter-inner{max-width:1160px;margin:0 auto;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.filter-input{
+  flex:1;min-width:200px;height:42px;padding:0 14px;
+  background:var(--input-bg);border:1px solid var(--input-border);border-radius:8px;
+  color:var(--text);font-size:.86rem;font-family:'DM Sans',sans-serif;
+  outline:none;transition:border-color .15s;
+}
+.filter-input:focus{border-color:var(--accent)}
+.filter-input::placeholder{color:var(--muted2)}
+.filter-chip{
+  padding:8px 16px;border-radius:20px;border:1px solid var(--border);
+  background:transparent;color:var(--muted);font-size:.78rem;font-weight:600;
+  cursor:pointer;transition:all .15s;white-space:nowrap;font-family:'DM Sans',sans-serif;
+}
+.filter-chip.active,.filter-chip:hover{border-color:var(--accent);color:var(--accent);background:var(--chip-bg)}
+.filter-chip.active{background:var(--chip-bg)}
+.sort-select{
+  height:42px;padding:0 12px;background:var(--input-bg);border:1px solid var(--input-border);
+  border-radius:8px;color:var(--text);font-size:.84rem;font-family:'DM Sans',sans-serif;
+  outline:none;cursor:pointer;appearance:none;-webkit-appearance:none;
+  padding-right:28px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 10px center;
+}
+
+/* ── RESULTS BAR ── */
+.results-bar{
+  max-width:1160px;margin:0 auto;padding:14px 40px;
+  display:flex;justify-content:space-between;align-items:center;
+  font-size:.82rem;color:var(--muted);
+}
+
+/* ── GRID ── */
+.grid-section{max-width:1160px;margin:0 auto;padding:0 40px 60px}
+.listing-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:18px}
+
+/* ── CARD ── */
+.card{
+  background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;
+  overflow:hidden;cursor:pointer;transition:border-color .2s,box-shadow .2s,transform .15s;
+}
+.card:hover{border-color:var(--accent);box-shadow:0 4px 24px rgba(0,0,0,.2);transform:translateY(-3px)}
+.card-img{
+  height:190px;background:var(--surface2) no-repeat center/cover;position:relative;
+}
+.card-badge{
+  position:absolute;top:10px;left:10px;
+  padding:4px 10px;border-radius:12px;font-size:.68rem;font-weight:700;
+  letter-spacing:.05em;text-transform:uppercase;color:#fff;backdrop-filter:blur(4px);
+  background:var(--badge-sale);
+}
+.card-badge.lease{background:var(--badge-lease)}
+.card-badge.sold{background:var(--badge-sold)}
+.card-price{
+  position:absolute;bottom:10px;right:10px;
+  background:rgba(0,0,0,.72);color:#fff;padding:4px 10px;border-radius:6px;
+  font-size:.76rem;font-weight:700;
+}
+.card-body{padding:16px}
+.card-name{font-weight:700;font-size:.88rem;color:var(--text);margin-bottom:3px;line-height:1.3}
+.card-addr{font-size:.76rem;color:var(--muted);margin-bottom:10px}
+.card-chips{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:10px}
+.card-chip{font-size:.65rem;font-weight:600;background:var(--chip-bg);color:var(--chip-text);padding:3px 9px;border-radius:9px}
+.card-stats{display:flex;gap:14px;padding-top:10px;border-top:1px solid var(--border)}
+.card-stat-lbl{font-size:.62rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.card-stat-val{font-size:.78rem;font-weight:700;color:var(--text);margin-top:1px}
+
+/* ── EMPTY/LOADING ── */
+.state-msg{
+  text-align:center;padding:80px 40px;color:var(--muted);font-size:.9rem;
+}
+.spin{
+  width:32px;height:32px;border:3px solid var(--border);border-top-color:var(--accent);
+  border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 16px;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── PAGINATION ── */
+.pagination{display:flex;justify-content:center;gap:7px;margin-top:36px;flex-wrap:wrap}
+.pg-btn{
+  min-width:36px;height:36px;padding:0 9px;border-radius:7px;
+  border:1px solid var(--border);background:var(--surface);color:var(--muted);
+  font-size:.82rem;font-weight:600;cursor:pointer;font-family:'DM Sans',sans-serif;
+  transition:all .15s;display:inline-flex;align-items:center;justify-content:center;
+}
+.pg-btn:hover:not(:disabled),.pg-btn.active{background:var(--accent);color:var(--accent-text);border-color:var(--accent)}
+.pg-btn:disabled{opacity:.3;cursor:not-allowed}
+
+/* ── MODAL ── */
+.modal-overlay{
+  display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);
+  z-index:200;align-items:flex-start;justify-content:center;
+  padding:40px 20px;overflow-y:auto;backdrop-filter:blur(6px);
+}
+.modal-overlay.open{display:flex}
+.modal{
+  background:var(--modal-bg);border:1px solid var(--border);border-radius:16px;
+  width:100%;max-width:760px;position:relative;overflow:hidden;
+  margin:auto;
+}
+.modal-close{
+  position:absolute;top:14px;right:14px;z-index:10;
+  width:32px;height:32px;border-radius:8px;border:1px solid var(--border);
+  background:var(--surface2);color:var(--muted);font-size:.9rem;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;
+  transition:all .15s;font-family:'DM Sans',sans-serif;
+}
+.modal-close:hover{border-color:var(--accent);color:var(--accent)}
+.modal-img{height:280px;background:var(--surface2) no-repeat center/cover}
+.modal-body{padding:28px}
+.modal-badges{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.modal-badge{padding:4px 12px;border-radius:14px;font-size:.72rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
+.modal-badge.type{background:var(--chip-bg);color:var(--chip-text)}
+.modal-badge.status{background:var(--badge-sale);color:#fff}
+.modal-badge.status.lease{background:var(--badge-lease)}
+.modal-badge.status.sold{background:var(--badge-sold)}
+.modal-name{font-size:1.4rem;font-weight:700;margin-bottom:6px;letter-spacing:-.01em}
+.modal-addr{font-size:.88rem;color:var(--muted);margin-bottom:20px}
+.modal-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:22px}
+.modal-stat{background:var(--surface2);border-radius:8px;padding:14px}
+.modal-stat-lbl{font-size:.68rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:4px}
+.modal-stat-val{font-size:.95rem;font-weight:700;color:var(--text)}
+.modal-desc{font-size:.87rem;color:var(--muted);line-height:1.7;margin-bottom:20px}
+.modal-actions{display:flex;gap:10px;flex-wrap:wrap}
+.modal-btn{
+  height:44px;padding:0 22px;border-radius:9px;
+  font-size:.85rem;font-weight:700;cursor:pointer;font-family:'DM Sans',sans-serif;
+  transition:all .15s;border:none;display:inline-flex;align-items:center;gap:8px;
+}
+.modal-btn.primary{background:var(--accent);color:var(--accent-text)}
+.modal-btn.ghost{background:transparent;border:1px solid var(--border);color:var(--text)}
+.modal-btn.primary:hover{opacity:.9}
+.modal-btn.ghost:hover{border-color:var(--accent);color:var(--accent)}
+
+/* ── RESPONSIVE ── */
+@media(max-width:640px){
+  nav,.hero,.filter-section,.results-bar,.grid-section{padding-left:16px;padding-right:16px}
+  .filter-section{padding-bottom:12px}
+  .modal-grid{grid-template-columns:repeat(2,1fr)}
+  .modal-body{padding:20px}
+  .modal-img{height:200px}
+}
+</style>
+</head>
+<body class="t-{{THEME}}">
+
+<nav>
+  <div>
+    <div class="nav-brand">{{COMPANY}}</div>
+    <div class="nav-tagline">Commercial Real Estate · Powered by RealNex</div>
+  </div>
+  <div class="nav-right" id="listingCount"></div>
+</nav>
+
+<div class="hero">
+  <div class="hero-inner">
+    <div class="hero-top">
+      <div>
+        <div class="hero-title">Available <span>Properties</span></div>
+        <div class="hero-subtitle">Browse our full portfolio of commercial listings</div>
+      </div>
+      <div class="hero-stat">
+        <div class="hero-stat-val" id="heroCount">—</div>
+        <div class="hero-stat-lbl">Listings</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="filter-section">
+  <div class="filter-inner">
+    <input type="text" class="filter-input" id="searchInput" placeholder="Search by name, address, city…">
+    <button type="button" class="filter-chip active" data-filter="all">All</button>
+    <button type="button" class="filter-chip" data-filter="sale">For Sale</button>
+    <button type="button" class="filter-chip" data-filter="lease">For Lease</button>
+    <button type="button" class="filter-chip" data-filter="sold">Sold</button>
+    <select class="sort-select" id="sortSelect">
+      <option value="updated">Sort: Recent</option>
+      <option value="price_asc">Price: Low–High</option>
+      <option value="price_desc">Price: High–Low</option>
+      <option value="name">Name A–Z</option>
+    </select>
+  </div>
+</div>
+
+<div class="results-bar">
+  <span id="resultsLabel">Loading…</span>
+</div>
+
+<div class="grid-section">
+  <div class="listing-grid" id="listingGrid">
+    <div class="state-msg" style="grid-column:1/-1">
+      <div class="spin"></div>
+      Loading listings…
+    </div>
+  </div>
+  <div class="pagination" id="pagination"></div>
+</div>
+
+<!-- MODAL -->
+<div class="modal-overlay" id="detailModal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div id="modalContent"></div>
+  </div>
+</div>
+
+<script>
+// ── Config ─────────────────────────────────────────────────────────────────
+// Server-injected serial; falls back to URL param for direct embed usage
+var _serial = '{{SERIAL}}';
+var SERIAL = (_serial && _serial !== '{{SERIAL}}')
+  ? _serial
+  : (new URLSearchParams(location.search).get('serial') || '');
+
+var _theme = '{{THEME}}';
+var THEME = (_theme && _theme !== '{{THEME}}')
+  ? _theme
+  : (new URLSearchParams(location.search).get('theme') || 'darkgold');
+
+var _company = '{{COMPANY}}';
+var COMPANY = (_company && _company !== '{{COMPANY}}')
+  ? _company
+  : (new URLSearchParams(location.search).get('company') || 'Commercial Real Estate');
+
+// Ensure theme class applied even when served as embed?serial= (no server injection)
+document.body.className = 't-' + THEME;
+document.title = COMPANY + ' — Listings';
+
+var PROXY = 'https://rnlp-proxy.onrender.com';
+var PER_PAGE = 9;
+
+// ── State ──────────────────────────────────────────────────────────────────
+var allListings = [];
+var filtered = [];
+var currentPage = 1;
+var activeFilter = 'all';
+var searchQuery = '';
+var sortMode = 'updated';
+
+// ── Fetch ──────────────────────────────────────────────────────────────────
+async function loadListings() {
+  if (!SERIAL) {
+    document.getElementById('listingGrid').innerHTML =
+      '<div class="state-msg" style="grid-column:1/-1">No serial configured.</div>';
+    return;
+  }
+  try {
+    var r = await fetch(PROXY + '/listings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serial: SERIAL, filters: { startIndex: 0, NoOfRecords: 500, SortBy: 'updated', SortHow: 'desc', SearchType: '' } })
+    });
+    var data = await r.json();
+    allListings = Array.isArray(data) ? (Array.isArray(data[0]) ? data[0] : data) : [];
+    document.getElementById('heroCount').textContent = allListings.length;
+    document.getElementById('listingCount').textContent = allListings.length + ' listing' + (allListings.length !== 1 ? 's' : '');
+    applyFilters();
+  } catch(e) {
+    document.getElementById('listingGrid').innerHTML =
+      '<div class="state-msg" style="grid-column:1/-1">Could not load listings. Check connection and try again.</div>';
+  }
+}
+
+// ── Filter / Sort ──────────────────────────────────────────────────────────
+function applyFilters() {
+  var q = searchQuery.toLowerCase();
+  filtered = allListings.filter(function(p) {
+    var lt = (p.ListingType || '').toUpperCase();
+    var st = (p.Status || '').toUpperCase();
+    var ok = true;
+    if (activeFilter === 'sale') ok = lt === 'FOR SALE' && st !== 'SOLD';
+    else if (activeFilter === 'lease') ok = lt === 'FOR LEASE';
+    else if (activeFilter === 'sold') ok = st === 'SOLD';
+    if (!ok) return false;
+    if (!q) return true;
+    var searchStr = [p.PropertyName, p.Street, p.City, p.State, p.Zip].filter(Boolean).join(' ').toLowerCase();
+    return searchStr.includes(q);
+  });
+
+  // Sort
+  filtered.sort(function(a, b) {
+    if (sortMode === 'price_asc') return (a.ListPrice || 0) - (b.ListPrice || 0);
+    if (sortMode === 'price_desc') return (b.ListPrice || 0) - (a.ListPrice || 0);
+    if (sortMode === 'name') return (a.PropertyName || '').localeCompare(b.PropertyName || '');
+    return 0; // 'updated' — keep server order
+  });
+
+  currentPage = 1;
+  renderGrid();
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+function getImg(p) {
+  var atts = p.Attachments || [];
+  for (var i = 0; i < atts.length; i++) {
+    if (atts[i].AttachmentType === 'photo' && atts[i].FileName) {
+      return atts[i].FileName + '?h=400&mode=max&autorotate=true';
+    }
+  }
+  return '';
+}
+function fmt(n) { return Number(n).toLocaleString('en-US'); }
+function esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function renderGrid() {
+  var grid = document.getElementById('listingGrid');
+  var start = (currentPage - 1) * PER_PAGE;
+  var page = filtered.slice(start, start + PER_PAGE);
+
+  document.getElementById('resultsLabel').textContent =
+    filtered.length + ' listing' + (filtered.length !== 1 ? 's' : '') + ' found';
+
+  if (!page.length) {
+    grid.innerHTML = '<div class="state-msg" style="grid-column:1/-1">No listings match your search.</div>';
+    buildPagination();
+    return;
+  }
+
+  grid.innerHTML = page.map(function(p) {
+    var img = getImg(p);
+    var lt = (p.ListingType || '').toUpperCase();
+    var sold = (p.Status || '').toUpperCase() === 'SOLD';
+    var badgeCls = lt === 'FOR LEASE' ? ' lease' : sold ? ' sold' : '';
+    var badgeTxt = lt === 'FOR LEASE' ? 'For Lease' : lt === 'FOR SALE' ? 'For Sale' : sold ? 'Sold' : (p.ListingType || p.Status || '');
+    var price = (p.PriceDisclosed && p.ListPrice) ? '$' + fmt(p.ListPrice) + (lt === 'FOR LEASE' && p.PriceUnits ? ' /SF' : '') : '';
+    var bsf = p.BuildingSf ? fmt(p.BuildingSf) + ' SF' : '';
+    var asf = p.SpaceAvailMin ? fmt(p.SpaceAvailMin) + ' SF avail.' : (p.LandSize ? p.LandSize + ' ' + (p.LandSizeType || 'AC') : '');
+    var types = (p.PropertyTypes || []).slice(0, 2).join(', ');
+    var pName = esc(p.PropertyName || '');
+    var addr = esc([p.Street, p.City, p.State].filter(Boolean).join(', '));
+    return '<div class="card" onclick="showDetail(\'' + p.Id + '\')">' +
+      '<div class="card-img"' + (img ? ' style="background-image:url(\'' + img + '\')"' : '') + '>' +
+        '<span class="card-badge' + badgeCls + '">' + badgeTxt + '</span>' +
+        (price ? '<span class="card-price">' + price + '</span>' : '') +
+      '</div>' +
+      '<div class="card-body">' +
+        '<div class="card-name">' + pName + '</div>' +
+        '<div class="card-addr">' + addr + '</div>' +
+        (types ? '<div class="card-chips"><span class="card-chip">' + esc(types) + '</span></div>' : '') +
+        ((bsf || asf) ?
+          '<div class="card-stats">' +
+            (bsf ? '<div><div class="card-stat-lbl">Building</div><div class="card-stat-val">' + bsf + '</div></div>' : '') +
+            (asf ? '<div><div class="card-stat-lbl">Available</div><div class="card-stat-val">' + asf + '</div></div>' : '') +
+          '</div>' : '') +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  buildPagination();
+}
+
+function buildPagination() {
+  var total = Math.ceil(filtered.length / PER_PAGE);
+  var pg = document.getElementById('pagination');
+  if (total <= 1) { pg.innerHTML = ''; return; }
+  var html = '<button class="pg-btn" ' + (currentPage === 1 ? 'disabled' : 'onclick="goPage(' + (currentPage - 1) + ')"') + '>‹</button>';
+  for (var i = 1; i <= total; i++) {
+    html += '<button class="pg-btn' + (i === currentPage ? ' active' : '') + '" onclick="goPage(' + i + ')">' + i + '</button>';
+  }
+  html += '<button class="pg-btn" ' + (currentPage === total ? 'disabled' : 'onclick="goPage(' + (currentPage + 1) + ')"') + '>›</button>';
+  pg.innerHTML = html;
+}
+
+function goPage(n) {
+  currentPage = n;
+  renderGrid();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+// ── Detail modal ───────────────────────────────────────────────────────────
+async function showDetail(id) {
+  var modal = document.getElementById('detailModal');
+  document.getElementById('modalContent').innerHTML =
+    '<div class="state-msg"><div class="spin"></div>Loading property…</div>';
+  modal.classList.add('open');
+  document.body.style.overflow = 'hidden';
+
+  try {
+    var r = await fetch(PROXY + '/property', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serial: SERIAL, property_id: parseInt(id) })
+    });
+    var data = await r.json();
+    var p = data.property || data;
+    if (!p || !p.Id) { document.getElementById('modalContent').innerHTML = '<div class="state-msg">Property not found.</div>'; return; }
+    renderModal(p);
+  } catch(e) {
+    document.getElementById('modalContent').innerHTML = '<div class="state-msg">Could not load property details.</div>';
+  }
+}
+
+function renderModal(p) {
+  var img = getImg(p);
+  var lt = (p.ListingType || '').toUpperCase();
+  var sold = (p.Status || '').toUpperCase() === 'SOLD';
+  var statusCls = lt === 'FOR LEASE' ? ' lease' : sold ? ' sold' : '';
+  var statusTxt = lt === 'FOR LEASE' ? 'For Lease' : lt === 'FOR SALE' ? 'For Sale' : sold ? 'Sold' : (p.ListingType || p.Status || '');
+  var price = (p.PriceDisclosed && p.ListPrice) ? '$' + fmt(p.ListPrice) : 'Price Upon Request';
+  var addr = [p.Street, p.City, p.State, p.Zip].filter(Boolean).join(', ');
+  var bsf = p.BuildingSf ? fmt(p.BuildingSf) + ' SF' : '—';
+  var asf = p.SpaceAvailMin ? fmt(p.SpaceAvailMin) + ' SF' : (p.LandSize ? p.LandSize + ' ' + (p.LandSizeType || 'AC') : '—');
+  var types = (p.PropertyTypes || []).join(', ') || '—';
+  var desc = p.Description || p.Comments || '';
+  var agentName = [p.AgentFirstName, p.AgentLastName].filter(Boolean).join(' ');
+  var agentEmail = p.AgentEmail || '';
+
+  document.getElementById('modalContent').innerHTML =
+    (img ? '<div class="modal-img" style="background-image:url(\'' + img + '\')"></div>' : '') +
+    '<div class="modal-body">' +
+      '<div class="modal-badges">' +
+        (types !== '—' ? '<span class="modal-badge type">' + esc(types) + '</span>' : '') +
+        '<span class="modal-badge status' + statusCls + '">' + statusTxt + '</span>' +
+      '</div>' +
+      '<div class="modal-name">' + esc(p.PropertyName || '') + '</div>' +
+      '<div class="modal-addr">' + esc(addr) + '</div>' +
+      '<div class="modal-grid">' +
+        '<div class="modal-stat"><div class="modal-stat-lbl">Price</div><div class="modal-stat-val">' + price + '</div></div>' +
+        '<div class="modal-stat"><div class="modal-stat-lbl">Building SF</div><div class="modal-stat-val">' + bsf + '</div></div>' +
+        '<div class="modal-stat"><div class="modal-stat-lbl">Available SF</div><div class="modal-stat-val">' + asf + '</div></div>' +
+      '</div>' +
+      (desc ? '<div class="modal-desc">' + esc(desc).replace(/\n/g, '<br>') + '</div>' : '') +
+      '<div class="modal-actions">' +
+        (agentEmail ? '<a href="mailto:' + esc(agentEmail) + '?subject=' + encodeURIComponent('Inquiry: ' + (p.PropertyName || '')) + '" class="modal-btn primary">Contact Agent</a>' : '') +
+        (agentName ? '<span class="modal-btn ghost" style="cursor:default">' + esc(agentName) + '</span>' : '') +
+      '</div>' +
+    '</div>';
+}
+
+function closeModal() {
+  document.getElementById('detailModal').classList.remove('open');
+  document.body.style.overflow = '';
+}
+document.getElementById('detailModal').addEventListener('click', function(e) {
+  if (e.target === this) closeModal();
+});
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeModal(); });
+
+// ── Event listeners ────────────────────────────────────────────────────────
+document.getElementById('searchInput').addEventListener('input', function() {
+  searchQuery = this.value;
+  applyFilters();
+});
+
+document.querySelectorAll('.filter-chip').forEach(function(chip) {
+  chip.addEventListener('click', function() {
+    document.querySelectorAll('.filter-chip').forEach(function(c) { c.classList.remove('active'); });
+    chip.classList.add('active');
+    activeFilter = chip.dataset.filter;
+    applyFilters();
+  });
+});
+
+document.getElementById('sortSelect').addEventListener('change', function() {
+  sortMode = this.value;
+  applyFilters();
+});
+
+// ── Init ───────────────────────────────────────────────────────────────────
+loadListings();
+</script>
+</body>
+</html>
