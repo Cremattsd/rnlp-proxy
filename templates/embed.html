@@ -309,6 +309,18 @@ var COMPANY = (_company && _company !== '{{COMPANY}}')
 document.body.className = 't-' + THEME;
 document.title = COMPANY + ' — Listings';
 
+// ── URL Param Config (layout / color / font / detail) ───────────────────────
+var _urlp = new URLSearchParams(location.search);
+var CFG_LAYOUT = _urlp.get('layout') || 'grid-map';
+var CFG_COLOR  = _urlp.get('color')  || null;
+var CFG_BG     = _urlp.get('bg')     || 'light';
+var CFG_FONT   = _urlp.get('font')   || 'modern';
+var CFG_DETAIL = _urlp.get('detail') || 'popup';
+if (CFG_COLOR) document.documentElement.style.setProperty('--accent', CFG_COLOR);
+if (CFG_BG === 'dark') document.body.classList.add('t-darkgold');
+var _fontMap = {modern:"'DM Sans',sans-serif",classic:"'Playfair Display',Georgia,serif",bold:"'Montserrat',sans-serif"};
+if (_fontMap[CFG_FONT]) document.documentElement.style.setProperty('--rnlp-font', _fontMap[CFG_FONT]);
+
 var PROXY = 'https://rnlp-proxy.onrender.com';
 var PER_PAGE = 9;
 
@@ -540,7 +552,24 @@ document.getElementById('sortSelect').addEventListener('change', function() {
 });
 
 // ── Init ───────────────────────────────────────────────────────────────────
-loadListings();
+loadListings().then(function(){
+  var g = document.getElementById('listingGrid');
+  if (!g) return;
+  if (CFG_LAYOUT === 'list') g.classList.add('rnlp-list');
+  if (CFG_LAYOUT === 'full-grid') g.classList.add('rnlp-full-grid');
+});
+// Add list/full-grid CSS
+(function(){
+  var s = document.createElement('style');
+  s.textContent = [
+    '#listingGrid.rnlp-list{display:flex!important;flex-direction:column;gap:6px}',
+    '#listingGrid.rnlp-list .card{display:grid!important;grid-template-columns:200px 1fr;min-height:120px;border-radius:8px}',
+    '#listingGrid.rnlp-list .card-img{height:100%!important;min-height:120px;border-radius:8px 0 0 8px}',
+    '#listingGrid.rnlp-list .card-body{padding:12px 16px}',
+    '#listingGrid.rnlp-full-grid{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))!important}'
+  ].join('');
+  document.head.appendChild(s);
+})();
 </script>
 </body>
 </html>
