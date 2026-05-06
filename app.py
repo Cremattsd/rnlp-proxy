@@ -255,107 +255,120 @@ def property_detail():
     serial      = data.get('serial', '').strip()
     property_id = data.get('property_id', '').strip()
 
+    print(f'PROPERTY REQUEST: serial={serial}, property_id={property_id}')
+
     if not serial:
         return jsonify({'error': 'serial required'}), 400
     if not property_id:
         return jsonify({'error': 'property_id required'}), 400
 
-    row = get_serial(serial)
-    if not row or not row['active']:
-        return jsonify({'error': 'Invalid or expired serial'}), 403
-
-    if _is_expired(row['expires_at']):
-        return jsonify({'error': 'Serial expired'}), 403
-
-    # ── Fetch listing via SearchListing1 with Id filter ───────────────────
     try:
-        prop_id_int = int(property_id)
-    except (ValueError, TypeError):
-        prop_id_int = property_id
+        row = get_serial(serial)
+        print(f'SERIAL DATA: {row}')
 
-    payload = {
-        'startIndex':    '0',
-        'NoOfRecords':   '1',
-        'SortBy':        'updated',
-        'SearchType':    '',
-        'PropertyTypes': '',
-        'AgentIDs':      'false',
-        'CompanyIDs':    [c.strip() for c in row['company_id'].split(',')],
-        'Id':            str(prop_id_int),
-    }
+        if not row or not row['active']:
+            return jsonify({'error': 'Invalid or expired serial'}), 403
 
-    try:
-        print(f'[/property] fetching id={prop_id_int}')
-        resp = requests.post(
-            REALNEX_SEARCH_API,
-            data=payload,
-            headers={'Content-Type': 'application/x-www-form-urlencoded'},
-            timeout=30,
-        )
-        print(f'[/property] status={resp.status_code}')
-        print(f'[/property] body={resp.text[:500]}')
-        resp.raise_for_status()
-        result = resp.json()
-    except requests.Timeout:
-        return jsonify({'error': 'RealNex API timeout'}), 504
-    except requests.RequestException as exc:
-        return jsonify({'error': str(exc)}), 502
+        if _is_expired(row['expires_at']):
+            return jsonify({'error': 'Serial expired'}), 403
 
-    # SearchListing1 returns [listings_array, total, ...] — extract listings_array[0]
-    listings = result[0] if isinstance(result, list) and result else []
-
-    # Fallback: if Id filter returns 0 results, do a broader search and find by Id
-    if not listings:
-        print(f'[/property] id-filtered search returned 0 results, trying fallback')
+        # ── Fetch listing via SearchListing1 with Id filter ───────────────────
         try:
-            fb_payload = {
-                'startIndex':    '0',
-                'NoOfRecords':   '100',
-                'SortBy':        'updated',
-                'SearchType':    '',
-                'PropertyTypes': '',
-                'AgentIDs':      'false',
-                'CompanyIDs':    [c.strip() for c in row['company_id'].split(',')],
-            }
-            fb_resp = requests.post(
+            prop_id_int = int(property_id)
+        except (ValueError, TypeError):
+            prop_id_int = property_id
+
+        payload = {
+            'startIndex':    '0',
+            'NoOfRecords':   '1',
+            'SortBy':        'updated',
+            'SearchType':    '',
+            'PropertyTypes': '',
+            'AgentIDs':      'false',
+            'CompanyIDs':    [c.strip() for c in row['company_id'].split(',')],
+            'Id':            str(prop_id_int),
+        }
+
+        try:
+            print(f'[/property] fetching id={prop_id_int}')
+            resp = requests.post(
                 REALNEX_SEARCH_API,
-                data=fb_payload,
+                data=payload,
                 headers={'Content-Type': 'application/x-www-form-urlencoded'},
                 timeout=30,
             )
-            fb_resp.raise_for_status()
-            fb_result = fb_resp.json()
-            fb_all = fb_result[0] if isinstance(fb_result, list) and fb_result else []
-            matched = [p for p in fb_all if str(p.get('Id', '')) == str(property_id)]
-            listings = matched if matched else fb_all[:1]
-            print(f'[/property] fallback returned {len(listings)} result(s)')
-        except Exception as exc:
-            print(f'[/property] fallback error: {exc}')
+            print(f'REALNEX STATUS: {resp.status_code}')
+            print(f'[/property] body={resp.text[:500]}')
+            resp.raise_for_status()
+            result = resp.json()
+        except requests.Timeout:
+            return jsonify({'error': 'RealNex API timeout'}), 504
+        except requests.RequestException as exc:
+            return jsonify({'error': str(exc)}), 502
 
-    if not listings:
-        return jsonify({'error': 'Property not found'}), 404
+        # SearchListing1 returns [listings_array, total, ...] — extract listings_array[0]
+        listings = result[0] if isinstance(result, list) and result else []
 
-    prop = listings[0]
+        # Fallback: if Id filter returns 0 results, do a broader search and find by Id
+        if not listings:
+            print(f'[/property] id-filtered search returned 0 results, trying fallback')
+            try:
+                fb_payload = {
+                    'startIndex':    '0',
+                    'NoOfRecords':   '100',
+                    'SortBy':        'updated',
+                    'SearchType':    '',
+                    'PropertyTypes': '',
+                    'AgentIDs':      'false',
+                    'CompanyIDs':    [c.strip() for c in row['company_id'].split(',')],
+                }
+                fb_resp = requests.post(
+                    REALNEX_SEARCH_API,
+                    data=fb_payload,
+                    headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                    timeout=30,
+                )
+                fb_resp.raise_for_status()
+                fb_result = fb_resp.json()
+                fb_all = fb_result[0] if isinstance(fb_result, list) and fb_result else []
+                matched = [p for p in fb_all if str(p.get('Id', '')) == str(property_id)]
+                listings = matched if matched else fb_all[:1]
+                print(f'[/property] fallback returned {len(listings)} result(s)')
+            except Exception as exc:
+                print(f'[/property] fallback error: {exc}')
 
-    # ── Enrich with census, walk score, neighborhood ─────────────────────
-    zip_code = prop.get('Zip', '')
-    lat      = float(prop.get('AddrLatitude',  0) or 0)
-    lon      = float(prop.get('AddrLongitude', 0) or 0)
-    address  = ', '.join(filter(None, [
-        prop.get('Street', ''), prop.get('City', ''),
-        prop.get('State', ''), zip_code,
-    ]))
+        if not listings:
+            return jsonify({'error': 'Property not found'}), 404
 
-    demographics = _fetch_demographics(zip_code)
-    walk_score   = _fetch_walk_score(lat, lon, address)
-    neighborhood = _fetch_neighborhood(lat, lon)
+        prop = listings[0]
 
-    return jsonify({
-        'property':     prop,
-        'demographics': demographics,
-        'walk_score':   walk_score,
-        'neighborhood': neighborhood,
-    })
+        # ── Enrich with census, walk score, neighborhood ─────────────────────
+        zip_code = prop.get('Zip', '')
+        lat      = float(prop.get('AddrLatitude',  0) or 0)
+        lon      = float(prop.get('AddrLongitude', 0) or 0)
+        address  = ', '.join(filter(None, [
+            prop.get('Street', ''), prop.get('City', ''),
+            prop.get('State', ''), zip_code,
+        ]))
+
+        demographics = _fetch_demographics(zip_code)
+        walk_score   = _fetch_walk_score(lat, lon, address)
+        neighborhood = _fetch_neighborhood(lat, lon)
+
+        return jsonify({
+            'property':     prop,
+            'demographics': demographics,
+            'walk_score':   walk_score,
+            'neighborhood': neighborhood,
+        })
+
+    except Exception as e:
+        import traceback
+        print(f'PROPERTY ERROR: {traceback.format_exc()}')
+        return jsonify({
+            'error':     str(e),
+            'traceback': traceback.format_exc(),
+        }), 500
 
 
 @app.route('/register', methods=['POST'])
