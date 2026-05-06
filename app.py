@@ -70,6 +70,9 @@ def _encode_filters(filters: dict) -> str:
     return urlencode(_php_build_query(filters))
 
 
+# ── In-memory enrichment cache (24 hr TTL) ────────────────────────────────
+_enrich_cache: dict = {}
+
 # ── Routes ─────────────────────────────────────────────────────────────────
 
 @app.route('/validate', methods=['POST'])
@@ -343,6 +346,8 @@ def property_detail():
                         'city':    addr.get('city') or addr.get('town'),
                         'state':   addr.get('state'),
                         'display': nom_data.get('display_name', '')[:120],
+                        'lat':     float(lat),
+                        'lon':     float(lon),
                     }
             except Exception as e:
                 print(f'Nominatim error: {e}')
@@ -359,6 +364,188 @@ def property_detail():
         tb = traceback.format_exc()
         print(f'PROPERTY ERROR: {tb}')
         return jsonify({'error': str(e), 'detail': tb}), 500
+
+
+@app.route('/enrich', methods=['POST'])
+def enrich():
+    """
+    POST /enrich
+    Body: { "serial": "...", "lat": <float>, "lon": <float>, "zip": "...", "address": "..." }
+    Returns combined enrichment: demographics, walk_score, traffic, environment, solar, amenities
+    Results cached 24 hrs in memory.
+    """
+    try:
+        data    = request.get_json(silent=True) or {}
+        serial  = data.get('serial', '')
+        lat     = data.get('lat')
+        lon     = data.get('lon')
+        zip_code = str(data.get('zip', '')).strip()
+        address  = str(data.get('address', '')).strip()
+
+        serial_data = get_serial(serial)
+        if not serial_data:
+            return jsonify({'error': 'Invalid serial'}), 403
+
+        cache_key = f'{lat},{lon},{zip_code}'
+        now = datetime.now(timezone.utc)
+        if cache_key in _enrich_cache:
+            cached_at, cached_data = _enrich_cache[cache_key]
+            if (now - cached_at).total_seconds() < 86400:
+                return jsonify(cached_data)
+
+        result = {
+            'demographics': None,
+            'walk_score':   None,
+            'traffic':      None,
+            'environment':  None,
+            'solar':        None,
+            'amenities':    None,
+        }
+
+        def safe_int(val):
+            try:
+                n = int(val)
+                return n if n > 0 else None
+            except Exception:
+                return None
+
+        # 1. Census demographics
+        if zip_code:
+            try:
+                census_url = (
+                    f'https://api.census.gov/data/2022/acs/acs5'
+                    f'?get=B01003_001E,B19013_001E,B25077_001E,B23025_005E'
+                    f'&for=zip%20code%20tabulation%20area:{zip_code}'
+                )
+                cr = requests.get(census_url, timeout=10)
+                if cr.status_code == 200:
+                    cd = cr.json()
+                    if len(cd) > 1:
+                        h, v = cd[0], cd[1]
+                        result['demographics'] = {
+                            'population':        safe_int(v[h.index('B01003_001E')]),
+                            'median_income':     safe_int(v[h.index('B19013_001E')]),
+                            'median_home_value': safe_int(v[h.index('B25077_001E')]),
+                            'unemployment':      safe_int(v[h.index('B23025_005E')]),
+                        }
+            except Exception as e:
+                print(f'[/enrich] census error: {e}')
+
+        if lat and lon:
+            # 2. Walk Score
+            ws_key = os.environ.get('WALKSCORE_API_KEY', '')
+            if ws_key:
+                try:
+                    ws_url = (
+                        f'https://api.walkscore.com/score?format=json'
+                        f'&address={quote(address)}&lat={lat}&lon={lon}'
+                        f'&transit=1&bike=1&wsapikey={ws_key}'
+                    )
+                    ws_r = requests.get(ws_url, timeout=10)
+                    if ws_r.status_code == 200:
+                        ws = ws_r.json()
+                        result['walk_score'] = {
+                            'walk':         ws.get('walkscore'),
+                            'walk_desc':    ws.get('description'),
+                            'transit':      ws.get('transit', {}).get('score') if ws.get('transit') else None,
+                            'transit_desc': ws.get('transit', {}).get('description') if ws.get('transit') else None,
+                            'bike':         ws.get('bike', {}).get('score') if ws.get('bike') else None,
+                            'bike_desc':    ws.get('bike', {}).get('description') if ws.get('bike') else None,
+                        }
+                except Exception as e:
+                    print(f'[/enrich] walk score error: {e}')
+
+            # 3. Traffic via Overpass (nearest major road)
+            try:
+                tq = (f'[out:json][timeout:8];'
+                      f'(way["highway"~"motorway|trunk|primary|secondary"](around:500,{lat},{lon}););out 1;')
+                tr_r = requests.get('https://overpass-api.de/api/interpreter',
+                                    params={'data': tq}, timeout=10)
+                if tr_r.status_code == 200:
+                    ways = tr_r.json().get('elements', [])
+                    if ways:
+                        tags = ways[0].get('tags', {})
+                        hw   = tags.get('highway', '')
+                        name = tags.get('name', 'Major Road')
+                        tc_map = {
+                            'motorway':  {'label': 'Freeway',       'daily': '100,000+',      'level': 'very_high'},
+                            'trunk':     {'label': 'Arterial',      'daily': '40,000–80,000', 'level': 'high'},
+                            'primary':   {'label': 'Primary Road',  'daily': '20,000–40,000', 'level': 'high'},
+                            'secondary': {'label': 'Secondary Road','daily': '5,000–20,000',  'level': 'medium'},
+                        }
+                        tc = tc_map.get(hw, {'label': 'Local Road', 'daily': '1,000–5,000', 'level': 'low'})
+                        result['traffic'] = {'road_name': name, 'road_type': tc['label'],
+                                             'daily_estimate': tc['daily'], 'level': tc['level']}
+            except Exception as e:
+                print(f'[/enrich] traffic error: {e}')
+
+            # 4. EPA EJScreen
+            try:
+                ej_url = (
+                    f'https://ejscreen.epa.gov/mapper/ejscreenRESTbroker.aspx'
+                    f'?namestr=&geometry={{"x":{lon},"y":{lat}}}'
+                    f'&distance=1&unit=9035&f=pjson'
+                )
+                ej_r = requests.get(ej_url, timeout=12)
+                if ej_r.status_code == 200:
+                    ej = ej_r.json()
+                    props = (ej.get('data', {}).get('blockgroup_properties')
+                             or ej.get('blockgroup_properties') or {})
+                    if props:
+                        result['environment'] = {
+                            'air_quality_pctile':        props.get('P_PM25',  props.get('PM25')),
+                            'traffic_proximity_pctile':  props.get('P_PTRAF', props.get('PTRAF')),
+                            'superfund_pctile':          props.get('P_PNPL',  props.get('PNPL')),
+                            'flood_risk_pctile':         props.get('P_UST',   props.get('UST')),
+                        }
+            except Exception as e:
+                print(f'[/enrich] EJScreen error: {e}')
+
+            # 5. NREL Solar
+            nrel_key = os.environ.get('NREL_API_KEY', 'DEMO_KEY')
+            try:
+                nrel_url = (
+                    f'https://developer.nrel.gov/api/solar/solar_resource/v1.json'
+                    f'?api_key={nrel_key}&lat={lat}&lon={lon}'
+                )
+                nrel_r = requests.get(nrel_url, timeout=10)
+                if nrel_r.status_code == 200:
+                    outputs = nrel_r.json().get('outputs', {})
+                    annual  = (outputs.get('avg_ghi') or {}).get('annual')
+                    if annual:
+                        ghi = round(float(annual), 2)
+                        result['solar'] = {
+                            'annual_ghi': ghi,
+                            'label': 'Excellent' if ghi >= 5.5 else 'Good' if ghi >= 4.5 else 'Moderate',
+                        }
+            except Exception as e:
+                print(f'[/enrich] NREL error: {e}')
+
+            # 6. Overpass amenities
+            try:
+                aq = (f'[out:json][timeout:10];'
+                      f'(node["amenity"~"restaurant|cafe|bank|pharmacy|hospital|parking|supermarket"]'
+                      f'(around:800,{lat},{lon}););out body 30;')
+                am_r = requests.get('https://overpass-api.de/api/interpreter',
+                                    params={'data': aq}, timeout=12)
+                if am_r.status_code == 200:
+                    amenities: dict = {}
+                    for el in am_r.json().get('elements', []):
+                        t = el.get('tags', {}).get('amenity')
+                        if t:
+                            amenities[t] = amenities.get(t, 0) + 1
+                    if amenities:
+                        result['amenities'] = amenities
+            except Exception as e:
+                print(f'[/enrich] amenities error: {e}')
+
+        _enrich_cache[cache_key] = (now, result)
+        return jsonify(result)
+
+    except Exception as e:
+        import traceback
+        print(f'[/enrich] ERROR: {traceback.format_exc()}')
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/register', methods=['POST'])

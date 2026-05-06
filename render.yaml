@@ -11,3 +11,7 @@ services:
         sync: false
       - key: WALKSCORE_API_KEY
         sync: false
+      - key: NREL_API_KEY
+        value: DEMO_KEY
+      - key: BLS_API_KEY
+        sync: false
