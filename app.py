@@ -244,131 +244,121 @@ def _fetch_neighborhood(lat: float, lon: float) -> dict | None:
 def property_detail():
     """
     POST /property
-    Body: { "serial": "...", "property_id": "..." }
-
-    Uses SearchListing1 with Id filter (NoOfRecords=1) to retrieve the full
-    listing object, then appends census demographics keyed on Zip.
-
-    Returns: { "property": {...}, "demographics": {...} | null }
+    Body: { "serial": "...", "property_id": <int or str> }
+    Returns: { "property": {...}, "demographics": {...}|null, "neighborhood": {...}|null, "walk_score": null }
     """
-    data        = request.get_json(silent=True) or {}
-    serial      = data.get('serial', '').strip()
-    property_id = data.get('property_id', '').strip()
-
-    print(f'PROPERTY REQUEST: serial={serial}, property_id={property_id}')
-
-    if not serial:
-        return jsonify({'error': 'serial required'}), 400
-    if not property_id:
-        return jsonify({'error': 'property_id required'}), 400
-
     try:
-        row = get_serial(serial)
-        print(f'SERIAL DATA: {row}')
+        data = request.get_json(silent=True) or {}
+        serial      = data.get('serial', '')
+        property_id = data.get('property_id')
 
-        if not row or not row['active']:
-            return jsonify({'error': 'Invalid or expired serial'}), 403
+        print(f'PROPERTY REQUEST: serial={serial}, property_id={property_id}')
 
-        if _is_expired(row['expires_at']):
-            return jsonify({'error': 'Serial expired'}), 403
+        serial_data = get_serial(serial)
+        print(f'SERIAL DATA: {serial_data}')
 
-        # ── Fetch listing via SearchListing1 with Id filter ───────────────────
-        try:
-            prop_id_int = int(property_id)
-        except (ValueError, TypeError):
-            prop_id_int = property_id
+        if not serial_data:
+            return jsonify({'error': 'Invalid serial'}), 403
+
+        raw = serial_data.get('company_id', '')
+        company_ids = [c.strip() for c in raw.split(',')]
 
         payload = {
-            'startIndex':    '0',
-            'NoOfRecords':   '1',
+            'startIndex':    0,
+            'NoOfRecords':   1,
             'SortBy':        'updated',
             'SearchType':    '',
             'PropertyTypes': '',
             'AgentIDs':      'false',
-            'CompanyIDs':    [c.strip() for c in row['company_id'].split(',')],
-            'Id':            str(prop_id_int),
+            'CompanyIDs':    company_ids[0],
+            'Id':            int(property_id),
         }
 
-        try:
-            print(f'[/property] fetching id={prop_id_int}')
-            resp = requests.post(
-                REALNEX_SEARCH_API,
-                data=payload,
-                headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                timeout=30,
-            )
-            print(f'REALNEX STATUS: {resp.status_code}')
-            print(f'[/property] body={resp.text[:500]}')
-            resp.raise_for_status()
-            result = resp.json()
-        except requests.Timeout:
-            return jsonify({'error': 'RealNex API timeout'}), 504
-        except requests.RequestException as exc:
-            return jsonify({'error': str(exc)}), 502
+        response = requests.post(
+            'https://searchv2.realnex.com/api/v2/SearchListing1',
+            data=payload,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            timeout=30,
+        )
+        print(f'REALNEX STATUS: {response.status_code}')
+        print(f'REALNEX BODY: {response.text[:500]}')
 
-        # SearchListing1 returns [listings_array, total, ...] — extract listings_array[0]
-        listings = result[0] if isinstance(result, list) and result else []
+        result   = response.json()
+        listings = result[0] if isinstance(result, list) and len(result) > 0 else []
+        prop     = listings[0] if isinstance(listings, list) and len(listings) > 0 else None
 
-        # Fallback: if Id filter returns 0 results, do a broader search and find by Id
-        if not listings:
-            print(f'[/property] id-filtered search returned 0 results, trying fallback')
-            try:
-                fb_payload = {
-                    'startIndex':    '0',
-                    'NoOfRecords':   '100',
-                    'SortBy':        'updated',
-                    'SearchType':    '',
-                    'PropertyTypes': '',
-                    'AgentIDs':      'false',
-                    'CompanyIDs':    [c.strip() for c in row['company_id'].split(',')],
-                }
-                fb_resp = requests.post(
-                    REALNEX_SEARCH_API,
-                    data=fb_payload,
-                    headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                    timeout=30,
-                )
-                fb_resp.raise_for_status()
-                fb_result = fb_resp.json()
-                fb_all = fb_result[0] if isinstance(fb_result, list) and fb_result else []
-                matched = [p for p in fb_all if str(p.get('Id', '')) == str(property_id)]
-                listings = matched if matched else fb_all[:1]
-                print(f'[/property] fallback returned {len(listings)} result(s)')
-            except Exception as exc:
-                print(f'[/property] fallback error: {exc}')
-
-        if not listings:
+        if not prop:
             return jsonify({'error': 'Property not found'}), 404
 
-        prop = listings[0]
+        # ── Census demographics ────────────────────────────────────────────
+        zip_code     = prop.get('Zip', '')
+        demographics = None
+        if zip_code:
+            try:
+                census_url = (
+                    f'https://api.census.gov/data/2022/acs/acs5'
+                    f'?get=B01003_001E,B19013_001E,B25077_001E,B23025_005E'
+                    f'&for=zip%20code%20tabulation%20area:{zip_code}'
+                )
+                census_r = requests.get(census_url, timeout=10)
+                if census_r.status_code == 200:
+                    census_data = census_r.json()
+                    if len(census_data) > 1:
+                        h = census_data[0]
+                        v = census_data[1]
+                        def safe_int(val):
+                            try:
+                                n = int(val)
+                                return n if n > 0 else None
+                            except Exception:
+                                return None
+                        demographics = {
+                            'population':        safe_int(v[h.index('B01003_001E')]),
+                            'median_income':     safe_int(v[h.index('B19013_001E')]),
+                            'median_home_value': safe_int(v[h.index('B25077_001E')]),
+                            'unemployment':      safe_int(v[h.index('B23025_005E')]),
+                        }
+            except Exception as e:
+                print(f'Census error: {e}')
 
-        # ── Enrich with census, walk score, neighborhood ─────────────────────
-        zip_code = prop.get('Zip', '')
-        lat      = float(prop.get('AddrLatitude',  0) or 0)
-        lon      = float(prop.get('AddrLongitude', 0) or 0)
-        address  = ', '.join(filter(None, [
-            prop.get('Street', ''), prop.get('City', ''),
-            prop.get('State', ''), zip_code,
-        ]))
-
-        demographics = _fetch_demographics(zip_code)
-        walk_score   = _fetch_walk_score(lat, lon, address)
-        neighborhood = _fetch_neighborhood(lat, lon)
+        # ── Nominatim neighborhood ─────────────────────────────────────────
+        neighborhood = None
+        lat = prop.get('AddrLatitude')
+        lon = prop.get('AddrLongitude')
+        if lat and lon:
+            try:
+                nom_r = requests.get(
+                    f'https://nominatim.openstreetmap.org/reverse'
+                    f'?lat={lat}&lon={lon}&format=json&addressdetails=1',
+                    headers={'User-Agent': 'RealNexListingsPro/1.0'},
+                    timeout=8,
+                )
+                if nom_r.status_code == 200:
+                    nom_data = nom_r.json()
+                    addr     = nom_data.get('address', {})
+                    neighborhood = {
+                        'neighborhood': (addr.get('neighbourhood') or addr.get('suburb')
+                                         or addr.get('quarter')),
+                        'county':  addr.get('county'),
+                        'city':    addr.get('city') or addr.get('town'),
+                        'state':   addr.get('state'),
+                        'display': nom_data.get('display_name', '')[:120],
+                    }
+            except Exception as e:
+                print(f'Nominatim error: {e}')
 
         return jsonify({
             'property':     prop,
             'demographics': demographics,
-            'walk_score':   walk_score,
             'neighborhood': neighborhood,
+            'walk_score':   None,
         })
 
     except Exception as e:
         import traceback
-        print(f'PROPERTY ERROR: {traceback.format_exc()}')
-        return jsonify({
-            'error':     str(e),
-            'traceback': traceback.format_exc(),
-        }), 500
+        tb = traceback.format_exc()
+        print(f'PROPERTY ERROR: {tb}')
+        return jsonify({'error': str(e), 'detail': tb}), 500
 
 
 @app.route('/register', methods=['POST'])
