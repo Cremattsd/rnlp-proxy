@@ -3,13 +3,18 @@ RealNex Listings Pro — Proxy Server
 Validates plugin serials and proxies listing requests to the RealNex Search API.
 """
 
+from __future__ import annotations
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 from datetime import datetime, timezone
 from urllib.parse import urlencode, quote
+from email.message import EmailMessage
 import requests
 import os
+import json
+import smtplib
 
 from db import init_db, get_serial, register_serial, revoke_serial, get_all_serials, log_report, get_all_reports, update_serial_domain
 from auth import require_admin_key
@@ -19,9 +24,14 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app, origins="*")
 
+SERVICE_NAME = 'realnex-marketplace-proxy'
+SERVICE_VERSION = os.getenv('SERVICE_VERSION', '3.5.0')
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'production')
+PUBLIC_API_BASE = os.getenv('PUBLIC_API_BASE', 'https://api.initial3development.com')
 REALNEX_SEARCH_API = 'https://searchv2.realnex.com/api/v2/SearchListing1'
 REALNEX_CRM_API    = 'https://sync.realnex.com'
 CENSUS_API         = 'https://api.census.gov/data/2022/acs/acs5'
+PUBLIC_LEAD_SUCCESS = 'Thanks. Your inquiry was sent to the listing team.'
 
 
 # ── DB init ────────────────────────────────────────────────────────────────
@@ -74,6 +84,25 @@ def _encode_filters(filters: dict) -> str:
 _enrich_cache: dict = {}
 
 # ── Routes ─────────────────────────────────────────────────────────────────
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({
+        'success': True,
+        'service': SERVICE_NAME,
+        'status': 'ok',
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+    })
+
+
+@app.route('/version', methods=['GET'])
+def version():
+    return jsonify({
+        'success': True,
+        'service': SERVICE_NAME,
+        'version': SERVICE_VERSION,
+        'environment': ENVIRONMENT,
+    })
 
 @app.route('/validate', methods=['POST'])
 def validate():
@@ -602,19 +631,113 @@ def serials():
     return jsonify(get_all_serials())
 
 
+def _admin_debug_enabled(data: dict) -> bool:
+    admin_key = os.getenv('ADMIN_KEY', '')
+    supplied = request.headers.get('X-Admin-Key') or data.get('admin_key') or ''
+    return bool(admin_key and supplied and supplied == admin_key)
+
+
+def _lead_log(serial: str, event: str, payload: dict) -> None:
+    try:
+        log_report(
+            serial,
+            request.headers.get('Origin') or request.headers.get('Referer') or '',
+            event,
+            json.dumps(payload, default=str),
+        )
+    except Exception as exc:
+        print(f'[/lead] log error: {exc}')
+
+
+def _pick_broker_email(data: dict, row: dict, warnings: list[str]) -> str:
+    candidates = [
+        data.get('broker_email', ''),
+        data.get('listing_broker_email', ''),
+        row.get('email', '') if row else '',
+        os.getenv('LEAD_EMAIL_FALLBACK', ''),
+    ]
+    for candidate in candidates:
+        email = str(candidate or '').strip()
+        if '@' in email:
+            return email
+    warnings.append('Broker email missing; no email recipient configured')
+    return ''
+
+
+def _send_lead_email(recipient: str, subject: str, body: str) -> dict:
+    if not recipient:
+        return {'sent': False, 'queued': True, 'warning': 'Broker email missing'}
+
+    sendgrid_key = os.getenv('SENDGRID_API_KEY', '').strip()
+    from_email = (
+        os.getenv('SENDGRID_FROM_EMAIL', '').strip()
+        or os.getenv('SMTP_FROM_EMAIL', '').strip()
+        or os.getenv('LEAD_EMAIL_FROM', '').strip()
+        or os.getenv('LEAD_EMAIL_FALLBACK', '').strip()
+    )
+
+    if sendgrid_key and from_email:
+        try:
+            resp = requests.post(
+                'https://api.sendgrid.com/v3/mail/send',
+                headers={
+                    'Authorization': f'Bearer {sendgrid_key}',
+                    'Content-Type': 'application/json',
+                },
+                json={
+                    'personalizations': [{'to': [{'email': recipient}]}],
+                    'from': {'email': from_email},
+                    'subject': subject,
+                    'content': [{'type': 'text/plain', 'value': body}],
+                },
+                timeout=12,
+            )
+            if resp.status_code in (200, 202):
+                return {'sent': True, 'provider': 'sendgrid'}
+            return {'sent': False, 'queued': True, 'warning': f'SendGrid failed with HTTP {resp.status_code}'}
+        except Exception as exc:
+            return {'sent': False, 'queued': True, 'warning': f'SendGrid exception: {exc}'}
+
+    smtp_host = os.getenv('SMTP_HOST', '').strip()
+    if smtp_host and from_email:
+        try:
+            msg = EmailMessage()
+            msg['From'] = from_email
+            msg['To'] = recipient
+            msg['Subject'] = subject
+            msg.set_content(body)
+
+            port = int(os.getenv('SMTP_PORT', '587'))
+            username = os.getenv('SMTP_USERNAME', '').strip()
+            password = os.getenv('SMTP_PASSWORD', '').strip()
+            use_tls = os.getenv('SMTP_USE_TLS', 'true').lower() != 'false'
+            with smtplib.SMTP(smtp_host, port, timeout=12) as smtp:
+                if use_tls:
+                    smtp.starttls()
+                if username and password:
+                    smtp.login(username, password)
+                smtp.send_message(msg)
+            return {'sent': True, 'provider': 'smtp'}
+        except Exception as exc:
+            return {'sent': False, 'queued': True, 'warning': f'SMTP exception: {exc}'}
+
+    return {'sent': False, 'queued': True, 'warning': 'Email provider missing'}
+
+
+def _crm_key(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        return ''
+    return str(payload.get('key') or payload.get('Key') or payload.get('projectKey') or payload.get('ProjectKey') or '').strip()
+
+
 @app.route('/lead', methods=['POST'])
 def lead():
     """
     POST /lead
     Body: { "serial", "name", "email", "phone", "message", "property_id", "property_name" }
 
-    Full CRM pipeline using the JWT stored against the serial:
-      1. Find or create contact by email
-      2. Find Projects linked to property (by listingId, fallback by notes)
-      3. Add contact as lead to each project
-      4. Create history entry
-      5. Link history to contact
-      6. Link history to each project
+    Public response is intentionally clean. CRM/email diagnostics are logged for
+    admins and returned only when a valid X-Admin-Key is supplied.
     """
     data          = request.get_json(silent=True) or {}
     serial        = data.get('serial', '').strip()
@@ -624,6 +747,10 @@ def lead():
     message       = data.get('message', '').strip()
     property_id   = data.get('property_id', '').strip()
     property_name = data.get('property_name', '').strip()
+    address       = data.get('address', '').strip()
+    page_url      = data.get('page_url', '').strip()
+    source_site   = data.get('source_website', '').strip() or request.headers.get('Origin', '')
+    admin_debug   = _admin_debug_enabled(data)
 
     if not serial:
         return jsonify({'error': 'serial required'}), 400
@@ -636,150 +763,258 @@ def lead():
     if _is_expired(row['expires_at']):
         return jsonify({'error': 'Serial expired'}), 403
 
-    jwt_token = (row.get('jwt') or '').strip()
-    if not jwt_token:
-        return jsonify({'error': 'CRM not configured for this serial (no jwt)'}), 500
-
-    parts      = name.split(' ', 1)
-    first_name = parts[0]
-    last_name  = parts[1] if len(parts) > 1 else ''
-
-    crm = REALNEX_CRM_API
-    hdrs = {
-        'Content-Type':        'application/json',
-        'Authorization':       f'Bearer {jwt_token}',
-        'Crm-ApplicationName': 'RealNexListingsPro',
+    warnings = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+    crm_result = {
+        'contact': 'skipped',
+        'contact_key': '',
+        'project': 'skipped',
+        'project_key': '',
+        'lead_link': 'skipped',
+        'history': 'skipped',
+        'history_key': '',
+        'history_links': 0,
+        'warnings': warnings,
     }
 
-    # ── STEP 1: Find or create contact ────────────────────────────────────
-    contact_key = None
-    try:
-        sr = requests.get(
-            f'{crm}/api/v1/CrmOData/Contacts',
-            params={'$filter': f"email eq '{email}'", '$top': '1'},
-            headers=hdrs, timeout=15,
-        )
-        if sr.status_code == 200:
-            contacts = sr.json().get('value', [])
-            if contacts:
-                contact_key = contacts[0].get('key') or contacts[0].get('Key')
-    except Exception:
-        pass
+    jwt_token = (row.get('jwt') or '').strip()
+    contact_key = ''
+    project_key = ''
 
-    if not contact_key:
+    history_body = '\n'.join([
+        f'Name: {name}',
+        f'Email: {email}',
+        f'Phone: {phone or "Not provided"}',
+        f'Message: {message or "Not provided"}',
+        f'Property name: {property_name or "Not provided"}',
+        f'Address: {address or "Not provided"}',
+        f'Listing ID: {property_id or "Not provided"}',
+        f'Page URL: {page_url or "Not provided"}',
+        f'Source website: {source_site or "Not provided"}',
+        f'Timestamp: {now_iso}',
+    ])
+
+    if jwt_token:
+        parts      = name.split(' ', 1)
+        first_name = parts[0]
+        last_name  = parts[1] if len(parts) > 1 else ''
+        crm = REALNEX_CRM_API
+        hdrs = {
+            'Content-Type':        'application/json',
+            'Authorization':       f'Bearer {jwt_token}',
+            'Crm-ApplicationName': 'RealNexListingsPro',
+        }
+
         try:
-            cr = requests.post(
-                f'{crm}/api/v1/Crm/contact',
-                json={'firstName': first_name, 'lastName': last_name,
-                      'email': email, 'mobile': phone, 'prospect': True},
+            sr = requests.get(
+                f'{crm}/api/v1/CrmOData/Contacts',
+                params={'$filter': f"email eq '{email}'", '$top': '1'},
                 headers=hdrs, timeout=15,
             )
-            if cr.status_code in (200, 201, 202):
-                contact_key = cr.json().get('key')
+            if sr.status_code == 200:
+                contacts = sr.json().get('value', [])
+                if contacts:
+                    contact_key = _crm_key(contacts[0])
+                    crm_result['contact'] = 'found'
+            else:
+                warnings.append(f'Contact search failed HTTP {sr.status_code}')
         except Exception as exc:
-            return jsonify({'error': f'Contact creation failed: {exc}'}), 502
+            warnings.append(f'Contact search failed: {exc}')
 
-    if not contact_key:
-        return jsonify({'error': 'Could not find or create CRM contact'}), 502
-
-    # ── STEP 2: Find projects linked to property ───────────────────────────
-    projects_linked = []
-    if property_id:
-        try:
-            pp = requests.get(
-                f'{crm}/api/v1/CrmOData/Properties',
-                params={'$filter': f'listingId eq {property_id}', '$expand': 'projects'},
-                headers=hdrs, timeout=15,
-            )
-            if pp.status_code == 200:
-                for prop in pp.json().get('value', []):
-                    for proj in prop.get('projects', prop.get('Projects', [])):
-                        pk = proj.get('key') or proj.get('Key')
-                        if pk and pk not in projects_linked:
-                            projects_linked.append(pk)
-        except Exception:
-            pass
-
-        if not projects_linked:
+        if not contact_key:
             try:
-                fb = requests.get(
-                    f'{crm}/api/v1/CrmOData/Projects',
-                    params={'$filter': f"contains(notes,'{property_id}')"},
+                cr = requests.post(
+                    f'{crm}/api/v1/Crm/contact',
+                    json={
+                        'fullName': name,
+                        'firstName': first_name,
+                        'lastName': last_name,
+                        'email': email,
+                        'mobile': phone,
+                        'prospect': True,
+                    },
                     headers=hdrs, timeout=15,
                 )
-                if fb.status_code == 200:
-                    for proj in fb.json().get('value', []):
-                        pk = proj.get('key') or proj.get('Key')
-                        if pk and pk not in projects_linked:
-                            projects_linked.append(pk)
-            except Exception:
-                pass
+                if cr.status_code in (200, 201, 202):
+                    contact_key = _crm_key(cr.json())
+                    crm_result['contact'] = 'created' if contact_key else 'create_returned_no_key'
+                else:
+                    warnings.append(f'Contact create failed HTTP {cr.status_code}')
+            except Exception as exc:
+                warnings.append(f'Contact create failed: {exc}')
+        crm_result['contact_key'] = contact_key
 
-    # ── STEP 3: Add contact as lead to each project ────────────────────────
-    linked_count = 0
-    for proj_key in projects_linked:
+        filters = []
+        if property_id:
+            filters.append(f"contains(notes,'{property_id}')")
+        if property_name:
+            safe_name = property_name.replace("'", "''")
+            filters.append(f"contains(projectName,'{safe_name}') or contains(notes,'{safe_name}')")
+        if address:
+            safe_address = address.replace("'", "''")
+            filters.append(f"contains(notes,'{safe_address}')")
+
+        for flt in filters:
+            try:
+                pr = requests.get(
+                    f'{crm}/api/v1/CrmOData/Projects',
+                    params={'$filter': flt, '$top': '1'},
+                    headers=hdrs, timeout=15,
+                )
+                if pr.status_code == 200:
+                    projects = pr.json().get('value', [])
+                    if projects:
+                        project_key = _crm_key(projects[0])
+                        crm_result['project'] = 'found'
+                        break
+                else:
+                    warnings.append(f'Project search failed HTTP {pr.status_code}')
+            except Exception as exc:
+                warnings.append(f'Project search failed: {exc}')
+
+        if not project_key:
+            project_notes = history_body + '\nCRM write result summary: Project created from website inquiry.'
+            try:
+                cp = requests.post(
+                    f'{crm}/api/v1/Crm/project',
+                    json={
+                        'projectName': f'Website Inquiry - {property_name or address or email}',
+                        'subject': f'Website Inquiry - {property_name or "Property Inquiry"}',
+                        'notes': project_notes,
+                        'dateOpened': now_iso,
+                    },
+                    headers=hdrs, timeout=15,
+                )
+                if cp.status_code in (200, 201, 202):
+                    project_key = _crm_key(cp.json())
+                    crm_result['project'] = 'created' if project_key else 'create_returned_no_key'
+                else:
+                    warnings.append(f'Project create failed HTTP {cp.status_code}')
+            except Exception as exc:
+                warnings.append(f'Project create failed: {exc}')
+        crm_result['project_key'] = project_key
+
+        if contact_key and project_key:
+            try:
+                lr = requests.post(
+                    f'{crm}/api/v1/Crm/project/{quote(project_key, safe="")}/lead',
+                    json={
+                        'published': True,
+                        'objectKey': contact_key,
+                        'notes': 'Website inquiry lead.',
+                    },
+                    headers=hdrs, timeout=15,
+                )
+                if lr.status_code in (200, 201, 202):
+                    crm_result['lead_link'] = 'created'
+                else:
+                    crm_result['lead_link'] = 'failed'
+                    warnings.append(f'Project lead link failed HTTP {lr.status_code}')
+            except Exception as exc:
+                crm_result['lead_link'] = 'failed'
+                warnings.append(f'Project lead link failed: {exc}')
+
+        result_lines = [
+            f'Contact: {crm_result["contact"]}',
+            f'Project: {crm_result["project"]}',
+            f'Lead link: {crm_result["lead_link"]}',
+        ]
+        notes_text = history_body + '\nCRM write result summary:\n' + '\n'.join(result_lines)
         try:
-            lr = requests.post(
-                f'{crm}/api/v1/Crm/project/{quote(proj_key, safe="")}/lead',
-                json={'contactKey': contact_key, 'notes': 'Web lead from property inquiry'},
+            hr = requests.post(
+                f'{crm}/api/v1/Crm/history',
+                json={
+                    'subject':      f'Website Inquiry - {property_name or "Property Inquiry"}',
+                    'notes':        notes_text,
+                    'startDate':    now_iso,
+                    'endDate':      now_iso,
+                    'timeless':     False,
+                    'eventTypeKey': 1,
+                    'published':    True,
+                    'projectKey':   project_key or None,
+                },
                 headers=hdrs, timeout=15,
             )
-            if lr.status_code in (200, 201, 202):
-                linked_count += 1
-        except Exception:
-            pass
+            if hr.status_code in (200, 201, 202):
+                history_key = _crm_key(hr.json())
+                crm_result['history'] = 'created' if history_key else 'create_returned_no_key'
+                crm_result['history_key'] = history_key
+            else:
+                warnings.append(f'History create failed HTTP {hr.status_code}')
+        except Exception as exc:
+            warnings.append(f'History create failed: {exc}')
 
-    # ── STEP 4: Create history entry ───────────────────────────────────────
-    history_key = None
-    now_iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
-    notes_text = 'Lead submitted via website inquiry form.\n\n'
-    if property_name:
-        notes_text += f'Property: {property_name}\n'
-    if property_id:
-        notes_text += f'Property ID: {property_id}\n'
-    notes_text += (f'Auto-linked to {linked_count} project(s).\n' if linked_count
-                   else 'No projects found — contact added without project link.\n')
-    if message:
-        notes_text += f'\nMessage from contact:\n{message}'
+        if crm_result['history_key']:
+            objects = []
+            if contact_key:
+                objects.append({'key': contact_key, 'type': 'Contact', 'description': name})
+            if project_key:
+                objects.append({'key': project_key, 'type': 'Project', 'description': property_name or 'Website Inquiry'})
+            if objects:
+                try:
+                    ho = requests.post(
+                        f'{crm}/api/v1/Crm/history/{quote(crm_result["history_key"], safe="")}/object',
+                        json=objects,
+                        headers=hdrs, timeout=10,
+                    )
+                    if ho.status_code in (200, 201, 202):
+                        crm_result['history_links'] = len(objects)
+                    else:
+                        warnings.append(f'History object link failed HTTP {ho.status_code}')
+                except Exception as exc:
+                    warnings.append(f'History object link failed: {exc}')
+    else:
+        warnings.append('CRM JWT missing')
 
-    try:
-        hr = requests.post(
-            f'{crm}/api/v1/Crm/history',
-            json={
-                'subject':      f'Web Lead \u2014 {property_name or "Property Inquiry"}',
-                'notes':        notes_text,
-                'startDate':    now_iso,
-                'endDate':      now_iso,
-                'timeless':     False,
-                'eventTypeKey': 1,
-                'published':    True,
-            },
-            headers=hdrs, timeout=15,
-        )
-        if hr.status_code in (200, 201, 202):
-            history_key = hr.json().get('key')
-    except Exception:
-        pass
+    recipient = _pick_broker_email(data, row, warnings)
+    email_result = _send_lead_email(
+        recipient,
+        f'New Listing Inquiry - {property_name or "Property Inquiry"}',
+        '\n'.join([
+            f'Property name: {property_name or "Not provided"}',
+            f'Address: {address or "Not provided"}',
+            f'Listing URL: {page_url or "Not provided"}',
+            f'Lead name: {name}',
+            f'Email: {email}',
+            f'Phone: {phone or "Not provided"}',
+            f'Message: {message or "Not provided"}',
+            f'Timestamp: {now_iso}',
+            f'Source: {source_site or "Not provided"}',
+            '',
+            'CRM result:',
+            f'- Contact: {crm_result["contact"]}',
+            f'- Project: {crm_result["project"]}',
+            f'- Lead link: {crm_result["lead_link"]}',
+            f'- History: {crm_result["history"]}',
+            f'- Warnings: {", ".join(warnings) if warnings else "None"}',
+        ]),
+    )
+    if email_result.get('warning'):
+        warnings.append(email_result['warning'])
 
-    # ── STEP 5 & 6: Link history to contact + each project ────────────────
-    if history_key:
-        hk_enc = quote(history_key, safe='')
-        for obj_key, obj_type in [(contact_key, 'contact')] + [(pk, 'project') for pk in projects_linked]:
-            try:
-                requests.post(
-                    f'{crm}/api/v1/Crm/history/{hk_enc}/object',
-                    json={'objectKey': obj_key, 'objectType': obj_type},
-                    headers=hdrs, timeout=10,
-                )
-            except Exception:
-                pass
+    diagnostic = {
+        'lead': {
+            'serial': serial,
+            'email': email,
+            'property_id': property_id,
+            'property_name': property_name,
+            'page_url': page_url,
+            'source_website': source_site,
+        },
+        'crm': crm_result,
+        'email': {
+            'recipient': recipient,
+            'sent': email_result.get('sent', False),
+            'queued': email_result.get('queued', False),
+            'provider': email_result.get('provider', ''),
+        },
+    }
+    _lead_log(serial, 'lead_submitted', diagnostic)
 
-    return jsonify({
-        'success':      True,
-        'contact_key':  contact_key,
-        'projects':     projects_linked,
-        'linked_count': linked_count,
-    })
+    response = {'success': True, 'message': PUBLIC_LEAD_SUCCESS}
+    if admin_debug:
+        response['admin_diagnostics'] = diagnostic
+    return jsonify(response)
 
 
 def _get_listings_ssr(company_id: str) -> list:
@@ -816,12 +1051,14 @@ def _render_seo_html(listings: list, company_name: str) -> str:
             if att.get('AttachmentType') == 'photo' and att.get('FileName'):
                 img = att['FileName'] + '?h=400&mode=max&autorotate=true'
                 break
+        img_html = f'<img src="{img}" alt="{name}" loading="lazy">' if img else ''
+        price_html = f'<p><strong>{price}</strong></p>' if price else ''
         cards += (
             f'<article class="rnlp-ssr-card">'
-            f'{f"<img src=\"{img}\" alt=\"{name}\" loading=\"lazy\">" if img else ""}'
+            f'{img_html}'
             f'<div class="rnlp-ssr-body">'
             f'<h3>{name}</h3><p>{addr}</p>'
-            f'{f"<p><strong>{price}</strong></p>" if price else ""}'
+            f'{price_html}'
             f'<p>{p.get("ListingType", "")}</p>'
             f'</div></article>'
         )
@@ -854,7 +1091,7 @@ def _render_embed_html(serial: str, company_name: str, theme: str) -> str:
         f'</head><body>'
         f'<div id="rnlp-embed"></div>'
         f'<script>window.RNLP_CONFIG = {{serial:"{serial}",theme:"{theme}",target:"#rnlp-embed"}};</script>'
-        f'<script src="/widget.js" async></script>'
+        f'<script src="{PUBLIC_API_BASE.rstrip("/")}/widget.js" async></script>'
         f'</body></html>'
     )
 
@@ -952,7 +1189,7 @@ var cfg=window.RNLP_CONFIG||{};
 if(!cfg.serial){console.warn('[RNLP] no serial configured');return;}
 var target=document.querySelector(cfg.target||'#rnlp-embed');
 if(!target){console.warn('[RNLP] target element not found');return;}
-var proxy='https://rnlp-proxy.onrender.com';
+var proxy='""" + PUBLIC_API_BASE.rstrip('/') + r"""';
 target.innerHTML='<p style="font-family:sans-serif;color:#64748b;padding:20px">Loading listings\u2026</p>';
 fetch(proxy+'/listings',{
   method:'POST',

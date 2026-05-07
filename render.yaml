@@ -7,6 +7,12 @@ services:
     envVars:
       - key: ADMIN_KEY
         generateValue: true
+      - key: ENVIRONMENT
+        value: production
+      - key: PUBLIC_API_BASE
+        value: https://api.initial3development.com
+      - key: SERVICE_VERSION
+        value: 3.5.0
       - key: DATABASE_URL
         sync: false
       - key: WALKSCORE_API_KEY

@@ -29,6 +29,34 @@ Check if a serial number is valid.
 
 ---
 
+### `GET /health`
+Lightweight production health check.
+
+```json
+{
+  "success": true,
+  "service": "realnex-marketplace-proxy",
+  "status": "ok",
+  "timestamp": "2026-05-06T00:00:00+00:00"
+}
+```
+
+---
+
+### `GET /version`
+Expose deployed service version and environment.
+
+```json
+{
+  "success": true,
+  "service": "realnex-marketplace-proxy",
+  "version": "3.5.0",
+  "environment": "production"
+}
+```
+
+---
+
 ### `POST /listings`
 Proxy a listing search to RealNex. Requires a valid serial.
 The server injects `company_id` automatically — never trust client-supplied `CompanyIDs`.
@@ -118,7 +146,7 @@ python app.py
 ## Issuing a Serial
 
 ```bash
-curl -X POST https://rnlp-proxy.onrender.com/register \
+curl -X POST https://api.initial3development.com/register \
   -H "Content-Type: application/json" \
   -H "X-Admin-Key: your-secret-key" \
   -d '{
