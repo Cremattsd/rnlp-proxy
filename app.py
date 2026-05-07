@@ -15,6 +15,7 @@ import requests
 import os
 import json
 import smtplib
+import re
 
 from db import init_db, get_serial, register_serial, revoke_serial, get_all_serials, log_report, get_all_reports, update_serial_domain
 from auth import require_admin_key
@@ -80,10 +81,129 @@ def _encode_filters(filters: dict) -> str:
     return urlencode(_php_build_query(filters))
 
 
+def _extract_listing_rows(payload) -> list:
+    if isinstance(payload, list) and payload and isinstance(payload[0], list):
+        return payload[0]
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ('listings', 'data', 'items'):
+            if isinstance(payload.get(key), list):
+                return payload[key]
+    return []
+
+
+def _listing_count(payload, rows: list) -> int:
+    if isinstance(payload, list):
+        for item in payload[1:]:
+            if isinstance(item, int):
+                return item
+    return len(rows)
+
+
+def _fetch_company_listings(company_id: str, limit: int = 12) -> tuple[list, int]:
+    filters = {
+        'startIndex': '0',
+        'NoOfRecords': str(limit),
+        'SortBy': 'updated',
+        'SortHow': 'desc',
+        'SearchType': '',
+        'CompanyIDs': [c.strip() for c in company_id.split(',') if c.strip()],
+    }
+    resp = requests.post(
+        REALNEX_SEARCH_API,
+        data=_encode_filters(filters),
+        headers={'Content-Type': 'application/x-www-form-urlencoded'},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    rows = _extract_listing_rows(payload)
+    return rows, _listing_count(payload, rows)
+
+
+def _company_name_from_listing(listing: dict) -> str:
+    company = listing.get('company') if isinstance(listing.get('company'), dict) else {}
+    return str(company.get('CompanyName') or listing.get('CompanyName') or '').strip()
+
+
+def _client_code(name: str, email: str = '', domain: str = '', fallback: str = 'CLIENT') -> str:
+    source = name or domain or (email.split('@')[-1] if email else '')
+    if name:
+        words = re.findall(r'[A-Za-z0-9]+', name.upper())
+        code = ''.join(word[0] for word in words[:4])
+        if len(code) < 3 and words:
+            code = ''.join(words)[:4]
+    else:
+        cleaned = re.sub(r'^(www\.)', '', source.lower()).split('.')[0]
+        code = re.sub(r'[^A-Za-z0-9]', '', cleaned).upper()[:4]
+    return (code or fallback)[:8]
+
+
+def _product_config(product_type: str) -> dict:
+    product = (product_type or 'mp_premier_2_0').strip()
+    if product == 'iframe_only':
+        return {
+            'product_type': 'iframe_only',
+            'plan': 'iframe',
+            'serial_prefix': 'RNLP-IFRAME',
+            'iframe_allowed': True,
+            'plugin_allowed': False,
+        }
+    return {
+        'product_type': 'mp_premier_2_0',
+        'plan': 'pro',
+        'serial_prefix': 'RNLP',
+        'iframe_allowed': True,
+        'plugin_allowed': True,
+    }
+
+
+def _product_from_row(row: dict) -> dict:
+    raw_product = (row.get('product_type') or '').strip()
+    raw_plan = (row.get('plan') or '').strip()
+    if raw_product:
+        return _product_config(raw_product)
+    if raw_plan in ('iframe', 'iframe_only'):
+        return _product_config('iframe_only')
+    return _product_config('mp_premier_2_0')
+
+
+def _generate_serial(product_type: str, client_code: str) -> str:
+    config = _product_config(product_type)
+    code = re.sub(r'[^A-Z0-9]', '', (client_code or 'CLIENT').upper())[:8] or 'CLIENT'
+    prefix = f'{config["serial_prefix"]}-{code}-'
+    try:
+        existing = get_all_serials()
+    except Exception:
+        existing = []
+    used = []
+    for row in existing:
+        serial = str(row.get('serial') or '')
+        if serial.startswith(prefix):
+            try:
+                used.append(int(serial.rsplit('-', 1)[-1]))
+            except Exception:
+                pass
+    next_num = max(used or [0]) + 1
+    return f'{prefix}{next_num:03d}'
+
+
 # ── In-memory enrichment cache (24 hr TTL) ────────────────────────────────
 _enrich_cache: dict = {}
 
 # ── Routes ─────────────────────────────────────────────────────────────────
+
+@app.route('/', methods=['GET'])
+def root():
+    return jsonify({
+        'success': True,
+        'service': SERVICE_NAME,
+        'status': 'ok',
+        'health': '/health',
+        'version': '/version',
+    })
+
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -123,11 +243,15 @@ def validate():
     if not row['active'] or _is_expired(row['expires_at']):
         return jsonify({'valid': False}), 200
 
+    product = _product_from_row(row)
     return jsonify({
-        'valid':      True,
-        'company_id': row['company_id'],
-        'plan':       row['plan'],
-        'expires_at': row['expires_at'],
+        'valid':          True,
+        'company_id':     row['company_id'],
+        'plan':           row['plan'],
+        'product_type':   product['product_type'],
+        'iframe_allowed': product['iframe_allowed'],
+        'plugin_allowed': product['plugin_allowed'],
+        'expires_at':     row['expires_at'],
     })
 
 
@@ -582,28 +706,112 @@ def enrich():
 def register():
     """
     POST /register  (X-Admin-Key required)
-    Body: { "serial", "company_id", "email", "plan", "expires_at" }
+    Body: { "serial"?, "company_id", "email"?, "domain"?, "product_type", "expires_at" }
     """
     data = request.get_json(silent=True) or {}
-    serial     = data.get('serial', '').strip()
     company_id = data.get('company_id', '').strip()
-    email      = data.get('email', '')
-    plan       = data.get('plan', 'basic')
+    email      = data.get('email', '').strip()
+    domain     = data.get('domain', '').strip()
     expires_at = data.get('expires_at')
-    jwt        = data.get('jwt', '')
+    jwt        = data.get('jwt', '').strip()
+    config     = _product_config(data.get('product_type') or data.get('plan'))
+    plan       = config['plan']
 
-    if not serial or not company_id:
-        return jsonify({'error': 'serial and company_id are required'}), 400
+    if not company_id:
+        return jsonify({'error': 'company_id is required'}), 400
 
-    domain = data.get('domain', '').strip()
+    preview = {}
+    company_name = data.get('company_name', '').strip()
+    try:
+        rows, count = _fetch_company_listings(company_id, 5)
+        if rows and not company_name:
+            company_name = _company_name_from_listing(rows[0])
+        preview = {'listing_count': count, 'company_name': company_name}
+    except Exception as exc:
+        preview = {'warning': f'Company preview unavailable during registration: {exc}'}
+
+    client_code = _client_code(data.get('client_code', '').strip() or company_name, email, domain)
+    serial = data.get('serial', '').strip() or _generate_serial(config['product_type'], client_code)
 
     try:
-        register_serial(serial, company_id, email, plan, expires_at, jwt)
+        register_serial(serial, company_id, email, plan, expires_at, jwt, config['product_type'])
         if domain:
             update_serial_domain(serial, domain)
-        return jsonify({'success': True, 'serial': serial})
+        embed_src = f'{PUBLIC_API_BASE.rstrip("/")}/embed?serial={quote(serial, safe="")}'
+        return jsonify({
+            'success': True,
+            'serial': serial,
+            'company_id': company_id,
+            'company_name': company_name,
+            'plan': plan,
+            'product_type': config['product_type'],
+            'expires_at': expires_at,
+            'plugin_allowed': config['plugin_allowed'],
+            'iframe_allowed': config['iframe_allowed'],
+            'plugin_download_url': 'https://www.initial3development.com/realnex-listings-pro' if config['plugin_allowed'] else '',
+            'shortcode': '[realnex_listings]' if config['plugin_allowed'] else '',
+            'iframe_src': embed_src,
+            'iframe_code': (
+                f'<iframe\n'
+                f'  src="{embed_src}"\n'
+                f'  width="100%"\n'
+                f'  height="900"\n'
+                f'  style="border:0;width:100%;"\n'
+                f'  loading="lazy">\n'
+                f'</iframe>'
+            ),
+            'preview': preview,
+        })
     except Exception as exc:
         return jsonify({'error': str(exc)}), 500
+
+
+@app.route('/company-preview', methods=['POST'])
+@require_admin_key
+def company_preview():
+    """
+    POST /company-preview  (X-Admin-Key required)
+    Body: { "company_id": "35853" }
+    """
+    data = request.get_json(silent=True) or {}
+    company_id = data.get('company_id', '').strip()
+    if not company_id:
+        return jsonify({'error': 'company_id is required'}), 400
+
+    try:
+        rows, count = _fetch_company_listings(company_id, 8)
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 502
+
+    company_name = _company_name_from_listing(rows[0]) if rows else ''
+    brokers = {}
+    samples = []
+    for listing in rows[:5]:
+        user = (listing.get('UserList') or [listing.get('User') or {}])[0] or {}
+        email = str(user.get('Email') or '').strip()
+        name = ' '.join([str(user.get('FirstName') or '').strip(), str(user.get('LastName') or '').strip()]).strip()
+        if email and email not in brokers:
+            brokers[email] = {'name': name, 'email': email, 'phone': user.get('Phone') or ''}
+        samples.append({
+            'id': listing.get('Id'),
+            'title': listing.get('PropertyName') or listing.get('Street') or 'Untitled Listing',
+            'address': ', '.join([str(listing.get(k) or '').strip() for k in ('Street', 'City', 'State', 'Zip') if str(listing.get(k) or '').strip()]),
+            'status': listing.get('Status') or '',
+            'listing_type': listing.get('ListingType') or '',
+            'property_type': ', '.join(listing.get('PropertyTypes') or []),
+            'broker_email': email,
+        })
+
+    return jsonify({
+        'success': True,
+        'company_id': company_id,
+        'listing_count': count,
+        'company_name': company_name,
+        'client_code': _client_code(company_name),
+        'sample_listings': samples,
+        'brokers': list(brokers.values()),
+        'warning': 'No listings found for this company_id.' if count == 0 else '',
+    })
 
 
 @app.route('/revoke', methods=['POST'])
@@ -666,7 +874,13 @@ def _pick_broker_email(data: dict, row: dict, warnings: list[str]) -> str:
 
 def _send_lead_email(recipient: str, subject: str, body: str) -> dict:
     if not recipient:
-        return {'sent': False, 'queued': True, 'warning': 'Broker email missing'}
+        return {
+            'sent': False,
+            'queued': True,
+            'simulated': True,
+            'status': 'simulated_no_recipient',
+            'warning': 'Broker email missing',
+        }
 
     sendgrid_key = os.getenv('SENDGRID_API_KEY', '').strip()
     from_email = (
@@ -693,10 +907,10 @@ def _send_lead_email(recipient: str, subject: str, body: str) -> dict:
                 timeout=12,
             )
             if resp.status_code in (200, 202):
-                return {'sent': True, 'provider': 'sendgrid'}
-            return {'sent': False, 'queued': True, 'warning': f'SendGrid failed with HTTP {resp.status_code}'}
+                return {'sent': True, 'provider': 'sendgrid', 'status': 'sent'}
+            return {'sent': False, 'queued': True, 'status': 'queued', 'warning': f'SendGrid failed with HTTP {resp.status_code}'}
         except Exception as exc:
-            return {'sent': False, 'queued': True, 'warning': f'SendGrid exception: {exc}'}
+            return {'sent': False, 'queued': True, 'status': 'queued', 'warning': f'SendGrid exception: {exc}'}
 
     smtp_host = os.getenv('SMTP_HOST', '').strip()
     if smtp_host and from_email:
@@ -717,11 +931,17 @@ def _send_lead_email(recipient: str, subject: str, body: str) -> dict:
                 if username and password:
                     smtp.login(username, password)
                 smtp.send_message(msg)
-            return {'sent': True, 'provider': 'smtp'}
+            return {'sent': True, 'provider': 'smtp', 'status': 'sent'}
         except Exception as exc:
-            return {'sent': False, 'queued': True, 'warning': f'SMTP exception: {exc}'}
+            return {'sent': False, 'queued': True, 'status': 'queued', 'warning': f'SMTP exception: {exc}'}
 
-    return {'sent': False, 'queued': True, 'warning': 'Email provider missing'}
+    return {
+        'sent': False,
+        'queued': True,
+        'simulated': True,
+        'status': 'simulated',
+        'warning': 'Email provider missing',
+    }
 
 
 def _crm_key(payload: dict) -> str:
@@ -964,7 +1184,11 @@ def lead():
                 except Exception as exc:
                     warnings.append(f'History object link failed: {exc}')
     else:
-        warnings.append('CRM JWT missing')
+        crm_result['status'] = 'skipped_no_jwt'
+        warnings.append('CRM JWT missing; writeback skipped')
+
+    if jwt_token and 'status' not in crm_result:
+        crm_result['status'] = 'attempted'
 
     recipient = _pick_broker_email(data, row, warnings)
     email_result = _send_lead_email(
@@ -992,7 +1216,18 @@ def lead():
     if email_result.get('warning'):
         warnings.append(email_result['warning'])
 
+    crm_status = crm_result.get('status') or 'attempted'
+    email_status = 'simulated' if email_result.get('simulated') else (email_result.get('status') or ('sent' if email_result.get('sent') else 'queued'))
+    lead_status = 'queued'
+    serial_status = 'valid'
+    company_id_status = 'present' if row.get('company_id') else 'missing'
+
     diagnostic = {
+        'serial_status': serial_status,
+        'company_id': company_id_status,
+        'lead_status': lead_status,
+        'email_status': email_status,
+        'crm_status': crm_status,
         'lead': {
             'serial': serial,
             'email': email,
@@ -1007,6 +1242,7 @@ def lead():
             'sent': email_result.get('sent', False),
             'queued': email_result.get('queued', False),
             'provider': email_result.get('provider', ''),
+            'simulated': email_result.get('simulated', False),
         },
     }
     _lead_log(serial, 'lead_submitted', diagnostic)

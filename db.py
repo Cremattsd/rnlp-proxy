@@ -27,6 +27,7 @@ def init_db():
                 )
             ''')
             cur.execute("ALTER TABLE serials ADD COLUMN IF NOT EXISTS domain TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE serials ADD COLUMN IF NOT EXISTS product_type TEXT DEFAULT ''")
             cur.execute('''
                 CREATE TABLE IF NOT EXISTS reports (
                     id         SERIAL PRIMARY KEY,
@@ -48,21 +49,22 @@ def get_serial(serial: str):
             return dict(row) if row else None
 
 
-def register_serial(serial: str, company_id: str, email: str, plan: str, expires_at, jwt: str = ''):
+def register_serial(serial: str, company_id: str, email: str, plan: str, expires_at, jwt: str = '', product_type: str = ''):
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute('''
-                INSERT INTO serials (serial, company_id, email, plan, expires_at, active, jwt, created_at)
-                VALUES (%s, %s, %s, %s, %s, 1, %s, %s)
+                INSERT INTO serials (serial, company_id, email, plan, expires_at, active, jwt, created_at, product_type)
+                VALUES (%s, %s, %s, %s, %s, 1, %s, %s, %s)
                 ON CONFLICT (serial) DO UPDATE SET
                     company_id = EXCLUDED.company_id,
                     email      = EXCLUDED.email,
                     plan       = EXCLUDED.plan,
                     expires_at = EXCLUDED.expires_at,
                     active     = 1,
-                    jwt        = EXCLUDED.jwt
-            ''', (serial, company_id, email or '', plan or 'basic', expires_at, jwt or '', now))
+                    jwt        = EXCLUDED.jwt,
+                    product_type = EXCLUDED.product_type
+            ''', (serial, company_id, email or '', plan or 'basic', expires_at, jwt or '', now, product_type or ''))
         conn.commit()
 
 
