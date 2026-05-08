@@ -17,7 +17,7 @@ import json
 import smtplib
 import re
 
-from db import init_db, get_serial, register_serial, revoke_serial, get_all_serials, log_report, get_all_reports, update_serial_domain
+from db import init_db, get_serial, register_serial, revoke_serial, get_all_serials, log_report, get_all_reports, update_serial_domain, check_lead_rate, log_lead_attempt
 from auth import require_admin_key
 
 load_dotenv()
@@ -977,11 +977,18 @@ def lead():
     if not name or not email:
         return jsonify({'error': 'name and email required'}), 400
 
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr or '').split(',')[0].strip()
+    rate_error = check_lead_rate(email, client_ip)
+    if rate_error:
+        return jsonify({'error': rate_error}), 429
+
     row = get_serial(serial)
     if not row or not row['active']:
         return jsonify({'error': 'Invalid or expired serial'}), 403
     if _is_expired(row['expires_at']):
         return jsonify({'error': 'Serial expired'}), 403
+
+    log_lead_attempt(client_ip, email, serial)
 
     warnings = []
     now_iso = datetime.now(timezone.utc).isoformat()

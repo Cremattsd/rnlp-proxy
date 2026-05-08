@@ -29,6 +29,16 @@ def init_db():
             cur.execute("ALTER TABLE serials ADD COLUMN IF NOT EXISTS domain TEXT DEFAULT ''")
             cur.execute("ALTER TABLE serials ADD COLUMN IF NOT EXISTS product_type TEXT DEFAULT ''")
             cur.execute('''
+                CREATE TABLE IF NOT EXISTS flagged_ips (
+                    id         SERIAL PRIMARY KEY,
+                    ip         TEXT,
+                    email      TEXT,
+                    serial     TEXT,
+                    reason     TEXT,
+                    created_at TEXT
+                )
+            ''')
+            cur.execute('''
                 CREATE TABLE IF NOT EXISTS reports (
                     id         SERIAL PRIMARY KEY,
                     serial     TEXT,
@@ -104,4 +114,40 @@ def update_serial_domain(serial: str, domain: str):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute('UPDATE serials SET domain = %s WHERE serial = %s', (domain, serial))
+        conn.commit()
+
+
+def check_lead_rate(email: str, ip: str):
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    cutoff_24h = (now - timedelta(hours=24)).isoformat()
+    cutoff_1h  = (now - timedelta(hours=1)).isoformat()
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                'SELECT COUNT(*) FROM flagged_ips WHERE email = %s AND created_at > %s',
+                (email, cutoff_24h),
+            )
+            if cur.fetchone()[0] >= 5:
+                return 'Too many submissions for this email. Try again later.'
+
+            cur.execute(
+                'SELECT COUNT(*) FROM flagged_ips WHERE ip = %s AND created_at > %s',
+                (ip, cutoff_1h),
+            )
+            if cur.fetchone()[0] >= 10:
+                return 'Too many submissions from this address. Try again later.'
+
+    return None
+
+
+def log_lead_attempt(ip: str, email: str, serial: str):
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                'INSERT INTO flagged_ips (ip, email, serial, reason, created_at) VALUES (%s, %s, %s, %s, %s)',
+                (ip, email, serial, 'lead_attempt', now),
+            )
         conn.commit()
