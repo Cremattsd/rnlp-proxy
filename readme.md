@@ -51,9 +51,32 @@ Expose deployed service version and environment.
   "success": true,
   "service": "realnex-marketplace-proxy",
   "version": "3.5.0",
+  "plugin_version": "3.6.0",
+  "plugin_info": "https://api.initial3development.com/plugin-info",
   "environment": "production"
 }
 ```
+
+---
+
+### `GET /plugin-info`
+Expose private WordPress plugin update metadata.
+
+```json
+{
+  "version": "3.6.0",
+  "download_url": "https://api.initial3development.com/download",
+  "requires": "6.0",
+  "tested": "6.7",
+  "last_updated": "2026-05-08T00:00:00+00:00"
+}
+```
+
+---
+
+### `GET /download?serial=...`
+Serve `realnex-listings-pro-latest.zip` to active plugin serials.
+Invalid, expired, or iframe-only serials receive `403`.
 
 ---
 
@@ -117,6 +140,8 @@ List all registered serials with metadata.
 |----------------|------------------------------------------|---------------|
 | `ADMIN_KEY`    | Secret key for admin endpoints           | *(required)*  |
 | `DATABASE_URL` | Path to SQLite database file             | `serials.db`  |
+| `PLUGIN_VERSION` | Latest RealNex Listings Pro version    | `3.6.0`       |
+| `PLUGIN_ZIP_PATH` | Path to latest plugin zip on server    | `realnex-listings-pro-latest.zip` |
 
 Copy `.env.example` → `.env` and fill in values.
 

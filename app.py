@@ -5,7 +5,7 @@ Validates plugin serials and proxies listing requests to the RealNex Search API.
 
 from __future__ import annotations
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from dotenv import load_dotenv
 from datetime import datetime, timezone
@@ -27,6 +27,8 @@ CORS(app, origins="*")
 
 SERVICE_NAME = 'realnex-marketplace-proxy'
 SERVICE_VERSION = os.getenv('SERVICE_VERSION', '3.5.0')
+PLUGIN_VERSION = os.getenv('PLUGIN_VERSION', '3.6.0')
+PLUGIN_ZIP_PATH = os.getenv('PLUGIN_ZIP_PATH', 'realnex-listings-pro-latest.zip')
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'production')
 PUBLIC_API_BASE = os.getenv('PUBLIC_API_BASE', 'https://api.initial3development.com')
 REALNEX_SEARCH_API = 'https://searchv2.realnex.com/api/v2/SearchListing1'
@@ -189,6 +191,15 @@ def _generate_serial(product_type: str, client_code: str) -> str:
     return f'{prefix}{next_num:03d}'
 
 
+def _valid_plugin_serial(serial: str) -> bool:
+    if not serial:
+        return False
+    row = get_serial(serial)
+    if not row or not row.get('active') or _is_expired(row.get('expires_at')):
+        return False
+    return bool(_product_from_row(row).get('plugin_allowed'))
+
+
 # ── In-memory enrichment cache (24 hr TTL) ────────────────────────────────
 _enrich_cache: dict = {}
 
@@ -221,8 +232,41 @@ def version():
         'success': True,
         'service': SERVICE_NAME,
         'version': SERVICE_VERSION,
+        'plugin_version': PLUGIN_VERSION,
+        'plugin_info': f'{PUBLIC_API_BASE.rstrip("/")}/plugin-info',
         'environment': ENVIRONMENT,
     })
+
+
+@app.route('/plugin-info', methods=['GET'])
+def plugin_info():
+    return jsonify({
+        'version': PLUGIN_VERSION,
+        'download_url': f'{PUBLIC_API_BASE.rstrip("/")}/download',
+        'url': 'https://initial3development.com',
+        'requires': '6.0',
+        'tested': '6.7',
+        'last_updated': datetime.now(timezone.utc).isoformat(),
+        'changelog': 'Private RealNex Listings Pro release distributed by Initial3 Development.',
+    })
+
+
+@app.route('/download', methods=['GET'])
+def download_plugin():
+    serial = request.args.get('serial', '').strip()
+    if not _valid_plugin_serial(serial):
+        return jsonify({'error': 'Invalid serial'}), 403
+
+    zip_path = os.path.abspath(PLUGIN_ZIP_PATH)
+    if not os.path.exists(zip_path):
+        return jsonify({'error': 'Plugin package not found'}), 404
+
+    return send_file(
+        zip_path,
+        as_attachment=True,
+        download_name='realnex-listings-pro.zip',
+        mimetype='application/zip',
+    )
 
 @app.route('/validate', methods=['POST'])
 def validate():
