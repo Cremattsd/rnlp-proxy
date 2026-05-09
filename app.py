@@ -27,7 +27,7 @@ CORS(app, origins="*")
 
 SERVICE_NAME = 'realnex-marketplace-proxy'
 SERVICE_VERSION = os.getenv('SERVICE_VERSION', '3.5.0')
-PLUGIN_VERSION = os.getenv('PLUGIN_VERSION', '3.6.0')
+PLUGIN_VERSION = os.getenv('PLUGIN_VERSION', '3.6.2')
 PLUGIN_ZIP_PATH = os.getenv('PLUGIN_ZIP_PATH', 'realnex-listings-pro-latest.zip')
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'production')
 PUBLIC_API_BASE = os.getenv('PUBLIC_API_BASE', 'https://api.initial3development.com')
@@ -127,6 +127,189 @@ def _fetch_company_listings(company_id: str, limit: int = 12) -> tuple[list, int
 def _company_name_from_listing(listing: dict) -> str:
     company = listing.get('company') if isinstance(listing.get('company'), dict) else {}
     return str(company.get('CompanyName') or listing.get('CompanyName') or '').strip()
+
+
+def _first_value(*values):
+    for value in values:
+        if value not in (None, ''):
+            return value
+    return None
+
+
+def _address_value(address: dict, *keys):
+    for key in keys:
+        value = address.get(key)
+        if value not in (None, ''):
+            return value
+    return None
+
+
+def _format_rate(rate, rate_type: str = 'AnnuallySf') -> str:
+    if rate in (None, ''):
+        return ''
+    try:
+        amount = float(rate)
+    except (TypeError, ValueError):
+        return str(rate)
+    suffix = '/SF/Mo' if rate_type == 'MonthlySf' else '/SF/Yr'
+    return f'${amount:.2f}{suffix}'
+
+
+def map_listing(listing: dict) -> dict:
+    if not isinstance(listing, dict):
+        return {}
+
+    desc = listing.get('descriptions') if isinstance(listing.get('descriptions'), dict) else {}
+    description_fields = {
+        k: v for k, v in listing.items()
+        if any(x in str(k).lower() for x in ['remark', 'desc', 'comment', 'note', 'narrative', 'market', 'public'])
+    }
+    if desc:
+        description_fields['descriptions'] = desc
+    print('DESCRIPTION FIELDS:', description_fields)
+
+    description = _first_value(
+        desc.get('propertyDescription'),
+        desc.get('propertyDescriptionText'),
+        desc.get('areaDescription'),
+        desc.get('propertyHighlights'),
+        desc.get('brokerDescription'),
+        listing.get('Remarks'),
+        listing.get('PublicRemarks'),
+        listing.get('MarketingRemarks'),
+        listing.get('Description'),
+        listing.get('PropertyDescription'),
+        listing.get('Comments'),
+        listing.get('Notes'),
+        listing.get('Narrative'),
+        '',
+    ) or ''
+
+    images = listing.get('images') or listing.get('Images') or []
+    photos = []
+    if isinstance(images, list):
+        photos = sorted(
+            [p for p in images if isinstance(p, dict)],
+            key=lambda x: x.get('order') or x.get('SequenceNo') or 0,
+        )
+    photo_urls = [p.get('url') or p.get('Url') or p.get('FileName') for p in photos if p.get('url') or p.get('Url') or p.get('FileName')]
+    if not photo_urls:
+        for attachment in listing.get('Attachments') or []:
+            if isinstance(attachment, dict) and attachment.get('FileName'):
+                photo_urls.append(attachment['FileName'])
+
+    spaces = listing.get('spaces') or listing.get('Spaces') or listing.get('Space') or []
+    mapped_spaces = []
+    for s in spaces if isinstance(spaces, list) else []:
+        if not isinstance(s, dict):
+            continue
+        rate = _first_value(s.get('leaseRate'), s.get('leaseRateLow'), s.get('AnnualRate'), s.get('MonthlyRate'), s.get('RatePerSF'), s.get('Rate'), s.get('AskingRent'), s.get('ListPrice'), s.get('PricePerSF'), 0)
+        rate_type = s.get('leaseRateType') or 'AnnuallySf'
+        rate_display = '' if s.get('rateUndisclosed') else _format_rate(rate, rate_type)
+        mapped_spaces.append({
+            'spaceName': _first_value(s.get('spaceName'), s.get('SpaceNumber'), s.get('Suite'), s.get('UnitNumber'), s.get('SpaceId'), s.get('Name'), ''),
+            'spaceSize': _first_value(s.get('spaceSize'), s.get('SpaceAvailable'), s.get('AvailableSf'), s.get('AvailSf'), 0),
+            'leaseRate': rate_display,
+            'leaseType': _first_value(s.get('leaseType'), s.get('LeaseType'), s.get('LeasType'), ''),
+            'leaseTerms': _first_value(s.get('leaseTerms'), s.get('LeaseTerms'), ''),
+            'dateAvailable': _first_value(s.get('dateAvailableText'), s.get('dateAvailable'), s.get('DateAvailableTxt'), s.get('DateAvailable'), s.get('AvailDate'), s.get('AvailableDate'), s.get('ReadyDate'), 'Now'),
+            'clearanceHeight': _first_value(s.get('clearanceHeight'), s.get('ClearanceHeight'), ''),
+            'gradeDocks': _first_value(s.get('gradeDocks'), s.get('GradeDocks'), 0),
+            'highDocks': _first_value(s.get('highDocks'), s.get('HighDocks'), 0),
+            'wellDocks': _first_value(s.get('wellDocks'), s.get('WellDocks'), 0),
+            'nnnExpenses': _first_value(s.get('nnnexpenses'), s.get('NnnExpenses'), 0),
+            'officeSize': _first_value(s.get('officeSize'), s.get('OfficeSize'), 0),
+            'warehouseSize': _first_value(s.get('warehouseSize'), s.get('WarehouseSize'), 0),
+        })
+
+    agents = listing.get('agents') or []
+    if not agents:
+        agents = []
+        if isinstance(listing.get('User'), dict):
+            user = listing['User']
+            agents.append({
+                'name': ' '.join([str(user.get('FirstName') or '').strip(), str(user.get('LastName') or '').strip()]).strip(),
+                'email': user.get('Email'),
+                'staffId': user.get('Id') or user.get('UserId') or user.get('AgentId'),
+                'isDefault': True,
+            })
+        for user in listing.get('UserList') or []:
+            if isinstance(user, dict):
+                agents.append({
+                    'name': ' '.join([str(user.get('FirstName') or '').strip(), str(user.get('LastName') or '').strip()]).strip(),
+                    'email': user.get('Email'),
+                    'staffId': user.get('Id') or user.get('UserId') or user.get('AgentId'),
+                    'isDefault': False,
+                })
+    primary = next((a for a in agents if isinstance(a, dict) and a.get('isDefault')), agents[0] if agents else {})
+    details = listing.get('details') if isinstance(listing.get('details'), dict) else {}
+    address = listing.get('address') if isinstance(listing.get('address'), dict) else {}
+
+    listing_id = _first_value(listing.get('listingId'), listing.get('Id'), listing.get('ListingId'), listing.get('PropertyId'))
+    listing_type = _first_value(listing.get('type'), listing.get('ListingType'), listing.get('listingType'), listing.get('Status'), '')
+    status = _first_value(listing.get('originalStatus'), listing.get('Status'), listing_type, '')
+    zip_code = _address_value(address, 'zipCode', 'postalCode') or listing.get('ZipCode') or listing.get('Zip')
+    latitude = _first_value(listing.get('latitude'), listing.get('Latitude'), listing.get('AddrLatitude'), (listing.get('GeoPoint') or {}).get('Lat') if isinstance(listing.get('GeoPoint'), dict) else None)
+    longitude = _first_value(listing.get('longitude'), listing.get('Longitude'), listing.get('AddrLongitude'), (listing.get('GeoPoint') or {}).get('Lon') if isinstance(listing.get('GeoPoint'), dict) else None)
+
+    return {
+        'Id': listing_id,
+        'PropertyName': _first_value(listing.get('propertyName'), listing.get('PropertyName'), listing.get('name')),
+        'Status': status,
+        'OriginalStatus': _first_value(listing.get('originalStatus'), listing.get('OriginalStatus')),
+        'ListingType': listing_type,
+        'ListPrice': _first_value(listing.get('listPrice'), listing.get('ListPrice')),
+        'LeaseRateMin': _first_value(listing.get('leaseRateMin'), listing.get('LeaseRateMin')),
+        'LeaseRateMax': _first_value(listing.get('leaseRateMax'), listing.get('LeaseRateMax')),
+        'Address1': _address_value(address, 'address1', 'street') or listing.get('Address1') or listing.get('Street'),
+        'Street': _address_value(address, 'address1', 'street') or listing.get('Street') or listing.get('Address1'),
+        'City': _address_value(address, 'city') or listing.get('City'),
+        'State': _address_value(address, 'stateProvince', 'state') or listing.get('State'),
+        'ZipCode': zip_code,
+        'Zip': zip_code,
+        'Latitude': latitude,
+        'Longitude': longitude,
+        'AddrLatitude': latitude,
+        'AddrLongitude': longitude,
+        'BuildingSf': _first_value(listing.get('buildingSize'), listing.get('BuildingSf')),
+        'LandSize': _first_value(listing.get('landSize'), listing.get('LandSize')),
+        'YearBuilt': _first_value(listing.get('yearBuilt'), listing.get('YearBuilt')),
+        'YearRenovated': _first_value(listing.get('yearReno'), listing.get('YearRenovated')),
+        'Stories': _first_value(listing.get('stories'), listing.get('Stories')),
+        'SpaceSizeMin': _first_value(listing.get('spaceSizeMin'), listing.get('SpaceSizeMin'), listing.get('SpaceAvailMin')),
+        'SpaceSizeMax': _first_value(listing.get('spaceSizeMax'), listing.get('SpaceSizeMax'), listing.get('SpaceAvailMax')),
+        'SpaceAvailMin': _first_value(listing.get('spaceSizeMin'), listing.get('SpaceAvailMin')),
+        'SpaceAvailMax': _first_value(listing.get('spaceSizeMax'), listing.get('SpaceAvailMax')),
+        'CapRate': _first_value(listing.get('capRate'), listing.get('CapRate')),
+        'DateAvailable': _first_value(listing.get('dateAvailable'), listing.get('DateAvailable')),
+        'ImmediateAvail': _first_value(listing.get('immediateAvail'), listing.get('ImmediateAvail')),
+        'Description': description,
+        'description': description,
+        'Photos': photo_urls,
+        'PhotoCount': len(photo_urls),
+        'Spaces': mapped_spaces,
+        'Space': mapped_spaces,
+        'BrokerName': primary.get('name') if isinstance(primary, dict) else '',
+        'BrokerEmail': primary.get('email') if isinstance(primary, dict) else '',
+        'BrokerId': primary.get('staffId') if isinstance(primary, dict) else '',
+        'Agents': agents,
+        'Zoning': details.get('zoning') or listing.get('Zoning'),
+        'ParkingSpaces': details.get('parkingSpace') or listing.get('ParkingSpaces'),
+        'ParkingDesc': details.get('parkingDesc') or listing.get('ParkingDesc'),
+        'ClearanceHeight': details.get('clearanceHeight') or listing.get('ClearanceHeight'),
+        'GradeDocks': details.get('gradeDocks') or listing.get('GradeDocks'),
+        'HighDocks': details.get('highDocks') or listing.get('HighDocks'),
+        'WellDocks': details.get('wellDocks') or listing.get('WellDocks'),
+        'Power': details.get('power') or listing.get('Power'),
+        'Sprinkler': details.get('sprinkler') or listing.get('Sprinkler'),
+        'TrafficCount': details.get('trafficCount') or listing.get('TrafficCount'),
+        'Occupancy': details.get('occupancy') or listing.get('Occupancy'),
+        'MaxContiguous': details.get('maxContiguous') or listing.get('MaxContiguous'),
+        'MinDivisible': details.get('minDivisible') or listing.get('MinDivisible'),
+        'PropertyTypes': listing.get('PropertyTypes') or listing.get('propertyTypes') or [],
+        'PriceDisclosed': listing.get('PriceDisclosed', True),
+        'LandSizeType': listing.get('LandSizeType') or 'Ac',
+    }
 
 
 def _client_code(name: str, email: str = '', domain: str = '', fallback: str = 'CLIENT') -> str:
@@ -334,7 +517,22 @@ def listings():
             timeout=30,
         )
         resp.raise_for_status()
-        return jsonify(resp.json()), resp.status_code
+        payload = resp.json()
+        rows = _extract_listing_rows(payload)
+        mapped_rows = [map_listing(row) for row in rows]
+        if isinstance(payload, list):
+            mapped_payload = [mapped_rows] + payload[1:]
+        elif isinstance(payload, dict):
+            mapped_payload = dict(payload)
+            for key in ('listings', 'data', 'items'):
+                if isinstance(mapped_payload.get(key), list):
+                    mapped_payload[key] = mapped_rows
+                    break
+            else:
+                mapped_payload['listings'] = mapped_rows
+        else:
+            mapped_payload = mapped_rows
+        return jsonify(mapped_payload), resp.status_code
     except requests.Timeout:
         return jsonify({'error': 'RealNex API timeout'}), 504
     except requests.RequestException as exc:
@@ -440,6 +638,129 @@ def _fetch_neighborhood(lat: float, lon: float) -> dict | None:
     return None
 
 
+def _fetch_single_property_payload(data: dict, route_listing_id=None):
+    serial = data.get('serial', '')
+    property_id = route_listing_id or data.get('property_id') or data.get('listing_id') or data.get('id')
+
+    print(f'PROPERTY REQUEST: serial={serial}, property_id={property_id}')
+
+    serial_data = get_serial(serial)
+    print(f'SERIAL DATA: {serial_data}')
+
+    if not serial_data:
+        return jsonify({'error': 'Invalid serial'}), 403
+
+    raw = serial_data.get('company_id', '')
+    company_ids = [c.strip() for c in raw.split(',')]
+
+    payload = {
+        'startIndex':    0,
+        'NoOfRecords':   1,
+        'SortBy':        'updated',
+        'SearchType':    '',
+        'PropertyTypes': '',
+        'AgentIDs':      'false',
+        'CompanyIDs':    company_ids[0],
+        'Id':            int(property_id),
+    }
+
+    response = requests.post(
+        REALNEX_SEARCH_API,
+        data=payload,
+        headers={'Content-Type': 'application/x-www-form-urlencoded'},
+        timeout=30,
+    )
+    print(f'REALNEX STATUS: {response.status_code}')
+    print(f'REALNEX BODY: {response.text[:500]}')
+
+    result   = response.json()
+    listings = result[0] if isinstance(result, list) and len(result) > 0 else []
+    prop     = listings[0] if isinstance(listings, list) and len(listings) > 0 else None
+
+    if not prop:
+        return jsonify({'error': 'Property not found'}), 404
+
+    mapped_prop = map_listing(prop)
+
+    # ── Census demographics ────────────────────────────────────────────
+    zip_code     = mapped_prop.get('Zip') or mapped_prop.get('ZipCode') or ''
+    demographics = None
+    if zip_code:
+        try:
+            census_url = (
+                f'https://api.census.gov/data/2022/acs/acs5'
+                f'?get=B01003_001E,B19013_001E,B25077_001E,B23025_005E'
+                f'&for=zip%20code%20tabulation%20area:{zip_code}'
+            )
+            census_r = requests.get(census_url, timeout=10)
+            if census_r.status_code == 200:
+                census_data = census_r.json()
+                if len(census_data) > 1:
+                    h = census_data[0]
+                    v = census_data[1]
+                    def safe_int(val):
+                        try:
+                            n = int(val)
+                            return n if n > 0 else None
+                        except Exception:
+                            return None
+                    demographics = {
+                        'population':        safe_int(v[h.index('B01003_001E')]),
+                        'median_income':     safe_int(v[h.index('B19013_001E')]),
+                        'median_home_value': safe_int(v[h.index('B25077_001E')]),
+                        'unemployment':      safe_int(v[h.index('B23025_005E')]),
+                    }
+        except Exception as e:
+            print(f'Census error: {e}')
+
+    # ── Nominatim neighborhood ─────────────────────────────────────────
+    neighborhood = None
+    lat = mapped_prop.get('Latitude') or mapped_prop.get('AddrLatitude')
+    lon = mapped_prop.get('Longitude') or mapped_prop.get('AddrLongitude')
+    if lat and lon:
+        try:
+            nom_r = requests.get(
+                f'https://nominatim.openstreetmap.org/reverse'
+                f'?lat={lat}&lon={lon}&format=json&addressdetails=1',
+                headers={'User-Agent': 'RealNexListingsPro/1.0'},
+                timeout=8,
+            )
+            if nom_r.status_code == 200:
+                nom_data = nom_r.json()
+                addr     = nom_data.get('address', {})
+                neighborhood = {
+                    'neighborhood': (addr.get('neighbourhood') or addr.get('suburb')
+                                     or addr.get('quarter')),
+                    'county':  addr.get('county'),
+                    'city':    addr.get('city') or addr.get('town'),
+                    'state':   addr.get('state'),
+                    'display': nom_data.get('display_name', '')[:120],
+                    'lat':     float(lat),
+                    'lon':     float(lon),
+                }
+        except Exception as e:
+            print(f'Nominatim error: {e}')
+
+    return jsonify({
+        'property':     mapped_prop,
+        'listing':      mapped_prop,
+        'demographics': demographics,
+        'neighborhood': neighborhood,
+        'walk_score':   None,
+    })
+
+
+@app.route('/listing/<listing_id>', methods=['POST'])
+def listing_detail(listing_id):
+    try:
+        return _fetch_single_property_payload(request.get_json(silent=True) or {}, listing_id)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f'LISTING ERROR: {tb}')
+        return jsonify({'error': str(e), 'detail': tb}), 500
+
+
 @app.route('/property', methods=['POST'])
 def property_detail():
     """
@@ -449,112 +770,7 @@ def property_detail():
     """
     try:
         data = request.get_json(silent=True) or {}
-        serial      = data.get('serial', '')
-        property_id = data.get('property_id')
-
-        print(f'PROPERTY REQUEST: serial={serial}, property_id={property_id}')
-
-        serial_data = get_serial(serial)
-        print(f'SERIAL DATA: {serial_data}')
-
-        if not serial_data:
-            return jsonify({'error': 'Invalid serial'}), 403
-
-        raw = serial_data.get('company_id', '')
-        company_ids = [c.strip() for c in raw.split(',')]
-
-        payload = {
-            'startIndex':    0,
-            'NoOfRecords':   1,
-            'SortBy':        'updated',
-            'SearchType':    '',
-            'PropertyTypes': '',
-            'AgentIDs':      'false',
-            'CompanyIDs':    company_ids[0],
-            'Id':            int(property_id),
-        }
-
-        response = requests.post(
-            'https://searchv2.realnex.com/api/v2/SearchListing1',
-            data=payload,
-            headers={'Content-Type': 'application/x-www-form-urlencoded'},
-            timeout=30,
-        )
-        print(f'REALNEX STATUS: {response.status_code}')
-        print(f'REALNEX BODY: {response.text[:500]}')
-
-        result   = response.json()
-        listings = result[0] if isinstance(result, list) and len(result) > 0 else []
-        prop     = listings[0] if isinstance(listings, list) and len(listings) > 0 else None
-
-        if not prop:
-            return jsonify({'error': 'Property not found'}), 404
-
-        # ── Census demographics ────────────────────────────────────────────
-        zip_code     = prop.get('Zip', '')
-        demographics = None
-        if zip_code:
-            try:
-                census_url = (
-                    f'https://api.census.gov/data/2022/acs/acs5'
-                    f'?get=B01003_001E,B19013_001E,B25077_001E,B23025_005E'
-                    f'&for=zip%20code%20tabulation%20area:{zip_code}'
-                )
-                census_r = requests.get(census_url, timeout=10)
-                if census_r.status_code == 200:
-                    census_data = census_r.json()
-                    if len(census_data) > 1:
-                        h = census_data[0]
-                        v = census_data[1]
-                        def safe_int(val):
-                            try:
-                                n = int(val)
-                                return n if n > 0 else None
-                            except Exception:
-                                return None
-                        demographics = {
-                            'population':        safe_int(v[h.index('B01003_001E')]),
-                            'median_income':     safe_int(v[h.index('B19013_001E')]),
-                            'median_home_value': safe_int(v[h.index('B25077_001E')]),
-                            'unemployment':      safe_int(v[h.index('B23025_005E')]),
-                        }
-            except Exception as e:
-                print(f'Census error: {e}')
-
-        # ── Nominatim neighborhood ─────────────────────────────────────────
-        neighborhood = None
-        lat = prop.get('AddrLatitude')
-        lon = prop.get('AddrLongitude')
-        if lat and lon:
-            try:
-                nom_r = requests.get(
-                    f'https://nominatim.openstreetmap.org/reverse'
-                    f'?lat={lat}&lon={lon}&format=json&addressdetails=1',
-                    headers={'User-Agent': 'RealNexListingsPro/1.0'},
-                    timeout=8,
-                )
-                if nom_r.status_code == 200:
-                    nom_data = nom_r.json()
-                    addr     = nom_data.get('address', {})
-                    neighborhood = {
-                        'neighborhood': (addr.get('neighbourhood') or addr.get('suburb')
-                                         or addr.get('quarter')),
-                        'county':  addr.get('county'),
-                        'city':    addr.get('city') or addr.get('town'),
-                        'state':   addr.get('state'),
-                        'display': nom_data.get('display_name', '')[:120],
-                        'lat':     float(lat),
-                        'lon':     float(lon),
-                    }
-            except Exception as e:
-                print(f'Nominatim error: {e}')
-
-        return jsonify({
-            'property':     prop,
-            'demographics': demographics,
-            'neighborhood': neighborhood,
-            'walk_score':   None,
-        })
+        return _fetch_single_property_payload(data)
 
     except Exception as e:
         import traceback
