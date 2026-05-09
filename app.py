@@ -27,7 +27,7 @@ CORS(app, origins="*")
 
 SERVICE_NAME = 'realnex-marketplace-proxy'
 SERVICE_VERSION = os.getenv('SERVICE_VERSION', '3.5.0')
-PLUGIN_VERSION = os.getenv('PLUGIN_VERSION', '3.6.2')
+PLUGIN_VERSION = os.getenv('PLUGIN_VERSION', '3.7.0')
 PLUGIN_ZIP_PATH = os.getenv('PLUGIN_ZIP_PATH', 'realnex-listings-pro-latest.zip')
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'production')
 PUBLIC_API_BASE = os.getenv('PUBLIC_API_BASE', 'https://api.initial3development.com')
@@ -160,6 +160,23 @@ def map_listing(listing: dict) -> dict:
         return {}
 
     desc = listing.get('descriptions') if isinstance(listing.get('descriptions'), dict) else {}
+    description_property = _first_value(
+        desc.get('propertyDescription'),
+        desc.get('propertyDescriptionText'),
+        '',
+    ) or ''
+    description_area = _first_value(
+        desc.get('areaDescription'),
+        desc.get('areaDescriptionText'),
+        '',
+    ) or ''
+    description_highlights = _first_value(
+        desc.get('propertyHighlights'),
+        desc.get('propertyHighlightsText'),
+        '',
+    ) or ''
+    description_broker = desc.get('brokerDescription') or ''
+
     description_fields = {
         k: v for k, v in listing.items()
         if any(x in str(k).lower() for x in ['remark', 'desc', 'comment', 'note', 'narrative', 'market', 'public'])
@@ -169,11 +186,10 @@ def map_listing(listing: dict) -> dict:
     print('DESCRIPTION FIELDS:', description_fields)
 
     description = _first_value(
-        desc.get('propertyDescription'),
-        desc.get('propertyDescriptionText'),
-        desc.get('areaDescription'),
-        desc.get('propertyHighlights'),
-        desc.get('brokerDescription'),
+        description_property,
+        description_area,
+        description_highlights,
+        description_broker,
         listing.get('Remarks'),
         listing.get('PublicRemarks'),
         listing.get('MarketingRemarks'),
@@ -197,6 +213,21 @@ def map_listing(listing: dict) -> dict:
         for attachment in listing.get('Attachments') or []:
             if isinstance(attachment, dict) and attachment.get('FileName'):
                 photo_urls.append(attachment['FileName'])
+
+    attachments = []
+    for att in (listing.get('attachments') or listing.get('Attachments') or []):
+        if not isinstance(att, dict):
+            continue
+        url = att.get('url') or att.get('Url') or att.get('FileName') or ''
+        if not url:
+            continue
+        attachments.append({
+            'name': att.get('name') or att.get('Name') or 'Document',
+            'fileName': att.get('fileName') or att.get('FileName') or '',
+            'url': url,
+            'order': att.get('order') or att.get('SequenceNo') or 0,
+        })
+    attachments.sort(key=lambda x: x.get('order') or 0)
 
     spaces = listing.get('spaces') or listing.get('Spaces') or listing.get('Space') or []
     mapped_spaces = []
@@ -222,12 +253,20 @@ def map_listing(listing: dict) -> dict:
             'warehouseSize': _first_value(s.get('warehouseSize'), s.get('WarehouseSize'), 0),
         })
 
-    agents = listing.get('agents') or []
-    if not agents:
-        agents = []
+    agents_list = []
+    for agent in listing.get('agents') or []:
+        if not isinstance(agent, dict):
+            continue
+        agents_list.append({
+            'name': agent.get('name') or '',
+            'email': agent.get('email') or '',
+            'staffId': agent.get('staffId') or '',
+            'isDefault': agent.get('isDefault', False),
+        })
+    if not agents_list:
         if isinstance(listing.get('User'), dict):
             user = listing['User']
-            agents.append({
+            agents_list.append({
                 'name': ' '.join([str(user.get('FirstName') or '').strip(), str(user.get('LastName') or '').strip()]).strip(),
                 'email': user.get('Email'),
                 'staffId': user.get('Id') or user.get('UserId') or user.get('AgentId'),
@@ -235,15 +274,24 @@ def map_listing(listing: dict) -> dict:
             })
         for user in listing.get('UserList') or []:
             if isinstance(user, dict):
-                agents.append({
+                agents_list.append({
                     'name': ' '.join([str(user.get('FirstName') or '').strip(), str(user.get('LastName') or '').strip()]).strip(),
                     'email': user.get('Email'),
                     'staffId': user.get('Id') or user.get('UserId') or user.get('AgentId'),
                     'isDefault': False,
                 })
+    agents = agents_list
     primary = next((a for a in agents if isinstance(a, dict) and a.get('isDefault')), agents[0] if agents else {})
     details = listing.get('details') if isinstance(listing.get('details'), dict) else {}
     address = listing.get('address') if isinstance(listing.get('address'), dict) else {}
+
+    def _to_float(value) -> float:
+        if value in (None, ''):
+            return 0.0
+        try:
+            return float(str(value).replace(',', '').replace('$', ''))
+        except (TypeError, ValueError):
+            return 0.0
 
     listing_id = _first_value(listing.get('listingId'), listing.get('Id'), listing.get('ListingId'), listing.get('PropertyId'))
     listing_type = _first_value(listing.get('type'), listing.get('ListingType'), listing.get('listingType'), listing.get('Status'), '')
@@ -251,6 +299,19 @@ def map_listing(listing: dict) -> dict:
     zip_code = _address_value(address, 'zipCode', 'postalCode') or listing.get('ZipCode') or listing.get('Zip')
     latitude = _first_value(listing.get('latitude'), listing.get('Latitude'), listing.get('AddrLatitude'), (listing.get('GeoPoint') or {}).get('Lat') if isinstance(listing.get('GeoPoint'), dict) else None)
     longitude = _first_value(listing.get('longitude'), listing.get('Longitude'), listing.get('AddrLongitude'), (listing.get('GeoPoint') or {}).get('Lon') if isinstance(listing.get('GeoPoint'), dict) else None)
+    list_price = _to_float(_first_value(listing.get('listPrice'), listing.get('ListPrice'), 0))
+    building_sf = _to_float(_first_value(listing.get('buildingSize'), listing.get('BuildingSf'), 0))
+    land_sf_raw = _to_float(_first_value(listing.get('landSize'), listing.get('LandSize'), 0))
+    land_sf = round(land_sf_raw * 43560) if land_sf_raw else 0
+    acres = land_sf_raw or 0
+    price_per_sf = round(list_price / building_sf, 2) if building_sf and list_price else None
+    price_per_acre = round(list_price / acres, 0) if acres and list_price else None
+    price_per_land_sf = round(list_price / land_sf, 2) if land_sf and list_price else None
+    parcel_num = listing.get('parcelNum') or listing.get('ParcelNum') or ''
+    zoning = details.get('zoning') or listing.get('Zoning') or ''
+    num_buildings = listing.get('numBuilding') or listing.get('NumBuildings') or 1
+    year_reno = listing.get('yearReno') or listing.get('YearRenovated') or ''
+    cap_rate = listing.get('capRate') or listing.get('CapRate') or ''
 
     return {
         'Id': listing_id,
@@ -274,26 +335,38 @@ def map_listing(listing: dict) -> dict:
         'BuildingSf': _first_value(listing.get('buildingSize'), listing.get('BuildingSf')),
         'LandSize': _first_value(listing.get('landSize'), listing.get('LandSize')),
         'YearBuilt': _first_value(listing.get('yearBuilt'), listing.get('YearBuilt')),
-        'YearRenovated': _first_value(listing.get('yearReno'), listing.get('YearRenovated')),
+        'YearRenovated': year_reno,
         'Stories': _first_value(listing.get('stories'), listing.get('Stories')),
         'SpaceSizeMin': _first_value(listing.get('spaceSizeMin'), listing.get('SpaceSizeMin'), listing.get('SpaceAvailMin')),
         'SpaceSizeMax': _first_value(listing.get('spaceSizeMax'), listing.get('SpaceSizeMax'), listing.get('SpaceAvailMax')),
         'SpaceAvailMin': _first_value(listing.get('spaceSizeMin'), listing.get('SpaceAvailMin')),
         'SpaceAvailMax': _first_value(listing.get('spaceSizeMax'), listing.get('SpaceAvailMax')),
-        'CapRate': _first_value(listing.get('capRate'), listing.get('CapRate')),
+        'CapRate': cap_rate,
         'DateAvailable': _first_value(listing.get('dateAvailable'), listing.get('DateAvailable')),
         'ImmediateAvail': _first_value(listing.get('immediateAvail'), listing.get('ImmediateAvail')),
         'Description': description,
         'description': description,
+        'DescriptionProperty': description_property,
+        'DescriptionArea': description_area,
+        'DescriptionHighlights': description_highlights,
+        'DescriptionBroker': description_broker,
         'Photos': photo_urls,
         'PhotoCount': len(photo_urls),
+        'Attachments': attachments,
         'Spaces': mapped_spaces,
         'Space': mapped_spaces,
         'BrokerName': primary.get('name') if isinstance(primary, dict) else '',
         'BrokerEmail': primary.get('email') if isinstance(primary, dict) else '',
         'BrokerId': primary.get('staffId') if isinstance(primary, dict) else '',
         'Agents': agents,
-        'Zoning': details.get('zoning') or listing.get('Zoning'),
+        'PricePerSF': price_per_sf,
+        'PricePerAcre': price_per_acre,
+        'PricePerLandSF': price_per_land_sf,
+        'LandSF': land_sf,
+        'Acres': acres,
+        'ParcelNum': parcel_num,
+        'Zoning': zoning,
+        'NumBuildings': num_buildings,
         'ParkingSpaces': details.get('parkingSpace') or listing.get('ParkingSpaces'),
         'ParkingDesc': details.get('parkingDesc') or listing.get('ParkingDesc'),
         'ClearanceHeight': details.get('clearanceHeight') or listing.get('ClearanceHeight'),
