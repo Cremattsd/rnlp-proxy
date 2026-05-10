@@ -852,6 +852,63 @@ def property_detail():
         return jsonify({'error': str(e), 'detail': tb}), 500
 
 
+@app.route('/property-details', methods=['POST', 'OPTIONS'])
+def property_details():
+    """
+    POST /property-details
+    Body: { "serial": "...", "property_id": "..." }
+    Calls RealNex PropertyDetails V2 endpoint which returns full attachments (multi-photo).
+    """
+    if request.method == 'OPTIONS':
+        return jsonify({'ok': True}), 200
+    try:
+        body = request.get_json(silent=True) or {}
+        serial = body.get('serial', '').strip()
+        property_id = body.get('property_id', '').strip()
+
+        if not serial or not property_id:
+            return jsonify({'error': 'serial and property_id required'}), 400
+
+        serial_data = get_serial(serial)
+        if not serial_data:
+            return jsonify({'error': 'invalid serial'}), 403
+
+        upstream = requests.post(
+            'https://searchv2.realnex.com/api/v2/PropertyDetails',
+            data={'PropertyId': property_id},
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            timeout=15
+        )
+
+        if upstream.status_code != 200:
+            return jsonify({'error': 'upstream error', 'status': upstream.status_code}), 502
+
+        raw = upstream.json()
+        detail_str = raw.get('PropertyDetail', '{}')
+        try:
+            detail = json.loads(detail_str) if isinstance(detail_str, str) else detail_str
+        except (json.JSONDecodeError, TypeError):
+            detail = {}
+
+        source = {}
+        try:
+            source = detail.get('hits', {}).get('hits', [{}])[0].get('_source', {})
+        except (IndexError, AttributeError, TypeError):
+            pass
+
+        return jsonify({
+            'success': True,
+            'property_id': property_id,
+            'source': source,
+        }), 200
+
+    except requests.RequestException as e:
+        return jsonify({'error': 'network error', 'detail': str(e)}), 502
+    except Exception as e:
+        import traceback
+        return jsonify({'error': 'server error', 'detail': str(e)}), 500
+
+
 @app.route('/enrich', methods=['POST'])
 def enrich():
     """
