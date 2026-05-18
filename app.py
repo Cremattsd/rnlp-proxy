@@ -17,7 +17,11 @@ import json
 import smtplib
 import re
 
-from db import init_db, get_serial, register_serial, revoke_serial, get_all_serials, log_report, get_all_reports, update_serial_domain, check_lead_rate, log_lead_attempt
+import time
+from db import (init_db, get_serial, register_serial, revoke_serial, get_all_serials,
+                log_report, get_all_reports, update_serial_domain, check_lead_rate,
+                log_lead_attempt, cache_get, cache_set, make_dedup_signature,
+                check_dedup, log_submission)
 from auth import require_admin_key
 
 load_dotenv()
@@ -1340,6 +1344,26 @@ def _crm_key(payload: dict) -> str:
     return str(payload.get('key') or payload.get('Key') or payload.get('projectKey') or payload.get('ProjectKey') or '').strip()
 
 
+def _realnex_request(method: str, url: str, **kwargs):
+    """Wrapper with retry-on-429 backoff for RealNex CRM calls."""
+    kwargs.setdefault('timeout', 15)
+    last_resp = None
+    for attempt in range(3):
+        try:
+            r = requests.request(method, url, **kwargs)
+            if r.status_code != 429:
+                return r
+            last_resp = r
+            wait = 2 ** attempt  # 1s, 2s, 4s
+            print(f'[CRM] 429 on {method} {url}, retry in {wait}s (attempt {attempt + 1})')
+            time.sleep(wait)
+        except requests.exceptions.Timeout:
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
+    return last_resp
+
+
 @app.route('/lead', methods=['POST'])
 def lead():
     """
@@ -1379,6 +1403,11 @@ def lead():
         return jsonify({'error': 'Serial expired'}), 403
 
     log_lead_attempt(client_ip, email, serial)
+
+    dedup_sig = make_dedup_signature(email, property_id, serial)
+    if check_dedup(dedup_sig, window_seconds=60):
+        return jsonify({'ok': True, 'dedup': True, 'message': 'Already submitted'}), 200
+    log_submission(dedup_sig, email, property_id, serial)
 
     warnings = []
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -1422,105 +1451,123 @@ def lead():
             'Crm-ApplicationName': 'RealNexListingsPro',
         }
 
-        try:
-            sr = requests.get(
-                f'{crm}/api/v1/CrmOData/Contacts',
-                params={'$filter': f"email eq '{email}'", '$top': '1'},
-                headers=hdrs, timeout=15,
-            )
-            if sr.status_code == 200:
-                contacts = sr.json().get('value', [])
-                if contacts:
-                    contact_key = _crm_key(contacts[0])
-                    crm_result['contact'] = 'found'
-            else:
-                warnings.append(f'Contact search failed HTTP {sr.status_code}')
-        except Exception as exc:
-            warnings.append(f'Contact search failed: {exc}')
-
-        if not contact_key:
+        # ── Contact: cache → lookup → create ───────────────────────────
+        contact_key = cache_get(email, 'contact') or ''
+        if contact_key:
+            crm_result['contact'] = 'cached'
+        else:
             try:
-                cr = requests.post(
-                    f'{crm}/api/v1/Crm/contact',
-                    json={
-                        'fullName': name,
-                        'firstName': first_name,
-                        'lastName': last_name,
-                        'email': email,
-                        'mobile': phone,
-                        'prospect': True,
-                    },
-                    headers=hdrs, timeout=15,
+                sr = _realnex_request('GET',
+                    f'{crm}/api/v1/CrmOData/Contacts',
+                    params={'$filter': f"email eq '{email}'", '$top': '1'},
+                    headers=hdrs,
                 )
-                if cr.status_code in (200, 201, 202):
-                    contact_key = _crm_key(cr.json())
-                    crm_result['contact'] = 'created' if contact_key else 'create_returned_no_key'
+                if sr.status_code == 200:
+                    contacts = sr.json().get('value', [])
+                    if contacts:
+                        contact_key = _crm_key(contacts[0])
+                        crm_result['contact'] = 'found'
                 else:
-                    warnings.append(f'Contact create failed HTTP {cr.status_code}')
+                    warnings.append(f'Contact search failed HTTP {sr.status_code}')
             except Exception as exc:
-                warnings.append(f'Contact create failed: {exc}')
+                warnings.append(f'Contact search failed: {exc}')
+
+            if not contact_key:
+                try:
+                    cr = _realnex_request('POST',
+                        f'{crm}/api/v1/Crm/contact',
+                        json={
+                            'fullName': name,
+                            'firstName': first_name,
+                            'lastName': last_name,
+                            'email': email,
+                            'mobile': phone,
+                            'prospect': True,
+                        },
+                        headers=hdrs,
+                    )
+                    if cr.status_code in (200, 201, 202):
+                        contact_key = _crm_key(cr.json())
+                        crm_result['contact'] = 'created' if contact_key else 'create_returned_no_key'
+                    else:
+                        warnings.append(f'Contact create failed HTTP {cr.status_code}')
+                except Exception as exc:
+                    warnings.append(f'Contact create failed: {exc}')
+
+            if contact_key:
+                cache_set(email, contact_key, 'contact', 3600)
         crm_result['contact_key'] = contact_key
 
-        filters = []
-        if property_id:
-            filters.append(f"contains(notes,'{property_id}')")
-        if property_name:
-            safe_name = property_name.replace("'", "''")
-            filters.append(f"contains(projectName,'{safe_name}') or contains(notes,'{safe_name}')")
-        if address:
-            safe_address = address.replace("'", "''")
-            filters.append(f"contains(notes,'{safe_address}')")
+        # ── Project: cache → consolidated search (1 call) → create ────
+        project_cache_key = f'{property_id}:{email}' if property_id else ''
+        project_key = cache_get(project_cache_key, 'project') if project_cache_key else ''
+        if project_key:
+            crm_result['project'] = 'cached'
+        else:
+            project_key = ''
+            filter_parts = []
+            if property_id:
+                filter_parts.append(f"contains(notes,'{property_id}')")
+            if property_name:
+                safe_name = property_name.replace("'", "''")
+                filter_parts.append(f"contains(projectName,'{safe_name}')")
+            if address:
+                safe_address = address.replace("'", "''")
+                filter_parts.append(f"contains(notes,'{safe_address}')")
 
-        for flt in filters:
-            try:
-                pr = requests.get(
-                    f'{crm}/api/v1/CrmOData/Projects',
-                    params={'$filter': flt, '$top': '1'},
-                    headers=hdrs, timeout=15,
-                )
-                if pr.status_code == 200:
-                    projects = pr.json().get('value', [])
-                    if projects:
-                        project_key = _crm_key(projects[0])
-                        crm_result['project'] = 'found'
-                        break
-                else:
-                    warnings.append(f'Project search failed HTTP {pr.status_code}')
-            except Exception as exc:
-                warnings.append(f'Project search failed: {exc}')
+            if filter_parts:
+                combined_filter = ' or '.join(filter_parts)
+                try:
+                    pr = _realnex_request('GET',
+                        f'{crm}/api/v1/CrmOData/Projects',
+                        params={'$filter': combined_filter, '$top': '1'},
+                        headers=hdrs,
+                    )
+                    if pr.status_code == 200:
+                        projects = pr.json().get('value', [])
+                        if projects:
+                            project_key = _crm_key(projects[0])
+                            crm_result['project'] = 'found'
+                    else:
+                        warnings.append(f'Project search failed HTTP {pr.status_code}')
+                except Exception as exc:
+                    warnings.append(f'Project search failed: {exc}')
 
-        if not project_key:
-            project_notes = history_body + '\nCRM write result summary: Project created from website inquiry.'
-            try:
-                cp = requests.post(
-                    f'{crm}/api/v1/Crm/project',
-                    json={
-                        'projectName': f'Website Inquiry - {property_name or address or email}',
-                        'subject': f'Website Inquiry - {property_name or "Property Inquiry"}',
-                        'notes': project_notes,
-                        'dateOpened': now_iso,
-                    },
-                    headers=hdrs, timeout=15,
-                )
-                if cp.status_code in (200, 201, 202):
-                    project_key = _crm_key(cp.json())
-                    crm_result['project'] = 'created' if project_key else 'create_returned_no_key'
-                else:
-                    warnings.append(f'Project create failed HTTP {cp.status_code}')
-            except Exception as exc:
-                warnings.append(f'Project create failed: {exc}')
+            if not project_key:
+                project_notes = history_body + '\nCRM write result summary: Project created from website inquiry.'
+                try:
+                    cp = _realnex_request('POST',
+                        f'{crm}/api/v1/Crm/project',
+                        json={
+                            'projectName': f'Website Inquiry - {property_name or address or email}',
+                            'subject': f'Website Inquiry - {property_name or "Property Inquiry"}',
+                            'notes': project_notes,
+                            'dateOpened': now_iso,
+                        },
+                        headers=hdrs,
+                    )
+                    if cp.status_code in (200, 201, 202):
+                        project_key = _crm_key(cp.json())
+                        crm_result['project'] = 'created' if project_key else 'create_returned_no_key'
+                    else:
+                        warnings.append(f'Project create failed HTTP {cp.status_code}')
+                except Exception as exc:
+                    warnings.append(f'Project create failed: {exc}')
+
+            if project_key and project_cache_key:
+                cache_set(project_cache_key, project_key, 'project', 3600)
         crm_result['project_key'] = project_key
 
         if contact_key and project_key:
             try:
-                lr = requests.post(
+                lr = _realnex_request('POST',
                     f'{crm}/api/v1/Crm/project/{quote(project_key, safe="")}/lead',
                     json={
                         'published': True,
                         'objectKey': contact_key,
                         'notes': 'Website inquiry lead.',
                     },
-                    headers=hdrs, timeout=15,
+                    headers=hdrs,
                 )
                 if lr.status_code in (200, 201, 202):
                     crm_result['lead_link'] = 'created'
@@ -1538,7 +1585,7 @@ def lead():
         ]
         notes_text = history_body + '\nCRM write result summary:\n' + '\n'.join(result_lines)
         try:
-            hr = requests.post(
+            hr = _realnex_request('POST',
                 f'{crm}/api/v1/Crm/history',
                 json={
                     'subject':      f'Website Inquiry - {property_name or "Property Inquiry"}',
@@ -1550,7 +1597,7 @@ def lead():
                     'published':    True,
                     'projectKey':   project_key or None,
                 },
-                headers=hdrs, timeout=15,
+                headers=hdrs,
             )
             if hr.status_code in (200, 201, 202):
                 history_key = _crm_key(hr.json())
@@ -1569,10 +1616,10 @@ def lead():
                 objects.append({'key': project_key, 'type': 'Project', 'description': property_name or 'Website Inquiry'})
             if objects:
                 try:
-                    ho = requests.post(
+                    ho = _realnex_request('POST',
                         f'{crm}/api/v1/Crm/history/{quote(crm_result["history_key"], safe="")}/object',
                         json=objects,
-                        headers=hdrs, timeout=10,
+                        headers=hdrs,
                     )
                     if ho.status_code in (200, 201, 202):
                         crm_result['history_links'] = len(objects)

@@ -1,7 +1,8 @@
 import os
+import hashlib
 import psycopg2
 import psycopg2.extras
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 DATABASE_URL = os.getenv('DATABASE_URL')
 
@@ -48,6 +49,32 @@ def init_db():
                     created_at TEXT
                 )
             ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS crm_key_cache (
+                    cache_key   TEXT PRIMARY KEY,
+                    cache_value TEXT NOT NULL,
+                    cache_type  TEXT NOT NULL,
+                    expires_at  TEXT NOT NULL,
+                    created_at  TEXT NOT NULL
+                )
+            ''')
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS lead_submissions (
+                    id               SERIAL PRIMARY KEY,
+                    dedup_signature  TEXT NOT NULL,
+                    email            TEXT,
+                    property_id      TEXT,
+                    serial           TEXT,
+                    crm_contact_key  TEXT DEFAULT '',
+                    crm_project_key  TEXT DEFAULT '',
+                    crm_history_key  TEXT DEFAULT '',
+                    status           TEXT DEFAULT 'pending',
+                    created_at       TEXT NOT NULL,
+                    completed_at     TEXT DEFAULT ''
+                )
+            ''')
+            cur.execute('CREATE INDEX IF NOT EXISTS idx_cache_type_expires ON crm_key_cache (cache_type, expires_at)')
+            cur.execute('CREATE INDEX IF NOT EXISTS idx_dedup_sig_created ON lead_submissions (dedup_signature, created_at)')
         conn.commit()
 
 
@@ -151,3 +178,73 @@ def log_lead_attempt(ip: str, email: str, serial: str):
                 (ip, email, serial, 'lead_attempt', now),
             )
         conn.commit()
+
+
+# ── CRM key cache ────────────────────────────────────────────────────────
+
+def cache_get(key: str, key_type: str):
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'SELECT cache_value FROM crm_key_cache WHERE cache_key = %s AND cache_type = %s AND expires_at > %s',
+                    (key, key_type, now),
+                )
+                row = cur.fetchone()
+                return row[0] if row else None
+    except Exception:
+        return None
+
+
+def cache_set(key: str, value: str, key_type: str, ttl_seconds: int = 3600):
+    now = datetime.now(timezone.utc)
+    expires = (now + timedelta(seconds=ttl_seconds)).isoformat()
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    INSERT INTO crm_key_cache (cache_key, cache_value, cache_type, expires_at, created_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (cache_key) DO UPDATE SET
+                        cache_value = EXCLUDED.cache_value,
+                        expires_at  = EXCLUDED.expires_at
+                ''', (key, value, key_type, expires, now.isoformat()))
+            conn.commit()
+    except Exception:
+        pass
+
+
+# ── Lead dedup ───────────────────────────────────────────────────────────
+
+def make_dedup_signature(email: str, property_id: str, serial: str) -> str:
+    raw = f'{email.lower().strip()}|{property_id.strip()}|{serial.strip()}'
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+def check_dedup(signature: str, window_seconds: int = 60):
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=window_seconds)).isoformat()
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'SELECT id FROM lead_submissions WHERE dedup_signature = %s AND created_at > %s LIMIT 1',
+                    (signature, cutoff),
+                )
+                return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def log_submission(signature: str, email: str, property_id: str, serial: str):
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    'INSERT INTO lead_submissions (dedup_signature, email, property_id, serial, created_at) VALUES (%s, %s, %s, %s, %s)',
+                    (signature, email, property_id, serial, now),
+                )
+            conn.commit()
+    except Exception:
+        pass
